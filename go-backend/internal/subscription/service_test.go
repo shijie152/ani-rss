@@ -209,3 +209,33 @@ func TestServiceDeleteFilesRequiresExplicitOptIn(t *testing.T) {
 		t.Fatalf("media directory remains after explicit delete, err=%v", err)
 	}
 }
+
+func TestServiceUpdatesCurrentEpisodeFromRefreshResults(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "one", Title: "Demo", URL: "https://example.test/rss", Season: 1}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	resources := []model.Resource{{Episode: 1, Master: true}, {Episode: 2.5, Master: true}, {Episode: 3, Master: false}}
+	if err := service.UpdateCurrentEpisode(item.ID, resources); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.Items()[0].CurrentEpisodeNumber; got != 2 {
+		t.Fatalf("current episode = %d, want 2", got)
+	}
+	item.DownloadNew = true
+	if err := service.Set(item); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UpdateCurrentEpisode(item.ID, resources); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.Items()[0].CurrentEpisodeNumber; got != 3 {
+		t.Fatalf("download-new current episode = %d, want 3", got)
+	}
+}

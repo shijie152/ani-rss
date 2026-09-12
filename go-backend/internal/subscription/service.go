@@ -283,6 +283,56 @@ func (s *Service) UpdateProgress(force bool, ids []string) error {
 	return s.saveLocked()
 }
 
+// UpdateCurrentEpisode records the progress derived from a successful RSS
+// refresh. Java counts integer episodes from the matched feed, except for
+// download-new subscriptions where the highest integer episode is the
+// progress value. In coexist mode only the primary RSS contributes.
+func (s *Service) UpdateCurrentEpisode(id string, resources []model.Resource) error {
+	if strings.TrimSpace(id) == "" {
+		return ErrNotFound
+	}
+	coexist := appconfig.Bool(s.config.Snapshot(), "coexist")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := -1
+	for candidate, item := range s.items {
+		if item.ID == id {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return ErrNotFound
+	}
+	item := s.items[index]
+	integerEpisodes := make([]int, 0, len(resources))
+	for _, resource := range resources {
+		if coexist && !resource.Master {
+			continue
+		}
+		if resource.Episode <= 0 || resource.Episode != float64(int(resource.Episode)) {
+			continue
+		}
+		integerEpisodes = append(integerEpisodes, int(resource.Episode))
+	}
+	current := 0
+	if item.DownloadNew {
+		for _, episode := range integerEpisodes {
+			if episode > current {
+				current = episode
+			}
+		}
+	} else {
+		current = len(integerEpisodes)
+	}
+	if item.CurrentEpisodeNumber == current {
+		return nil
+	}
+	s.items[index].CurrentEpisodeNumber = current
+	s.items[index].LastDownloadTime = time.Now().UnixMilli()
+	return s.saveLocked()
+}
+
 func (s *Service) DownloadPath(item model.Ani) (map[string]any, error) {
 	path, err := pathFor(s.config.Snapshot(), item, "")
 	if err != nil {

@@ -54,6 +54,9 @@ public class Runner implements ApplicationRunner {
             log.error(message, e);
             System.exit(1);
         }
-        RuntimeUtil.addShutdownHook(() -> log.info("程序退出..."));
+        RuntimeUtil.addShutdownHook(() -> {
+            taskService.stop();
+            log.info("程序退出...");
+        });
     }
 }

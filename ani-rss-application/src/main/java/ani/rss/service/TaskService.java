@@ -20,6 +20,8 @@ public class TaskService {
     public static final AtomicBoolean LOOP = new AtomicBoolean(false);
     public static final List<Thread> THREADS = new Vector<>();
 
+    private final RuntimeOwnership runtimeOwnership = new RuntimeOwnership();
+
     public void stop() {
         LOOP.set(false);
         for (Thread thread : THREADS) {
@@ -35,6 +37,7 @@ public class TaskService {
             }
         }
         THREADS.clear();
+        runtimeOwnership.releaseAll();
     }
 
     public void restart() {
@@ -49,16 +52,32 @@ public class TaskService {
         }
         LOOP.set(true);
 
-        List<Class<? extends BaseTask>> classList = List.of(RenameTask.class, RssTask.class, BgmTask.class);
+        List<TaskDefinition> definitions = List.of(
+                new TaskDefinition(RenameTask.class, "rename"),
+                new TaskDefinition(RssTask.class, "rss"),
+                new TaskDefinition(BgmTask.class, "maintenance")
+        );
 
-        for (Class<? extends BaseTask> aClass : classList) {
+        for (TaskDefinition definition : definitions) {
+            if (!runtimeOwnership.acquire(definition.domain())) {
+                continue;
+            }
+            Class<? extends BaseTask> aClass = definition.taskClass();
             BaseTask task = SpringUtil.getBean(aClass);
             String name = aClass.getSimpleName();
             String threadName = NamingCase.toKebabCase(name);
             THREADS.add(new Thread(() -> task.run(threadName, LOOP)));
         }
+        if (THREADS.isEmpty()) {
+            LOOP.set(false);
+            log.warn("RSS、重命名和维护任务均已被其他进程占用，Java 任务不会启动");
+            return;
+        }
         for (Thread thread : THREADS) {
             thread.start();
         }
+    }
+
+    private record TaskDefinition(Class<? extends BaseTask> taskClass, String domain) {
     }
 }

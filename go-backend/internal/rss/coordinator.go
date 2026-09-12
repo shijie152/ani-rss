@@ -61,9 +61,19 @@ func (c *Coordinator) Refresh(ctx context.Context, item model.Ani) ([]model.Reso
 		all = append(all, resources...)
 	}
 	all = dedupeFeeds(all, item, appconfig.Bool(c.Config.Snapshot(), "coexist"))
-	if submitted, submitErr := c.submit(ctx, item, all); submitErr != nil {
+	submitted, submitErr := c.submit(ctx, item, all)
+	if submitErr != nil {
 		all = submitted
 		failures = append(failures, submitErr.Error())
+	}
+	// A successful standby feed may still be submitted when the primary feed
+	// failed. Persist progress whenever at least one resource was actually
+	// accepted by the downloader, while avoiding progress updates for a fully
+	// failed or duplicate-only refresh.
+	if len(all) > 0 && (len(failures) == 0 || len(submitted) > 0) {
+		if progressErr := c.Subscriptions.UpdateCurrentEpisode(item.ID, all); progressErr != nil {
+			failures = append(failures, progressErr.Error())
+		}
 	}
 	if len(failures) > 0 {
 		return all, errors.New(strings.Join(failures, "; "))

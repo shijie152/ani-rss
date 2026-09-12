@@ -310,6 +310,18 @@ func TestHTTPRefreshDrivesRSSToQBittorrentCompletionChain(t *testing.T) {
 	if added.Load() != 1 {
 		t.Fatalf("add count after refresh = %d", added.Load())
 	}
+	listed := callJSON(t, server.URL+"/api/listAni", token, nil)
+	if listed["code"] != float64(http.StatusOK) {
+		t.Fatalf("list after refresh = %#v", listed)
+	}
+	weeks := listed["data"].(map[string]any)["weekList"].([]any)
+	if len(weeks) == 0 || len(weeks[0].(map[string]any)["items"].([]any)) == 0 {
+		t.Fatalf("subscription disappeared after refresh: %#v", listed)
+	}
+	progress := weeks[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+	if progress["currentEpisodeNumber"] != float64(1) {
+		t.Fatalf("current episode after refresh = %#v", progress["currentEpisodeNumber"])
+	}
 	status := callJSON(t, server.URL+"/api/torrentsInfos", token, nil)
 	if status["code"] != float64(http.StatusOK) {
 		t.Fatalf("torrent status = %#v", status)
