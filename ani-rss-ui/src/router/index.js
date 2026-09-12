@@ -1,5 +1,6 @@
 import {createRouter, createWebHashHistory} from 'vue-router'
 import DashboardView from '@/view/home/DashboardView.vue'
+import SeasonCatalogView from '@/view/home/SeasonCatalogView.vue'
 import SubscriptionView from '@/view/home/SubscriptionView.vue'
 import TorrentsInfosView from '@/view/home/TorrentsInfosView.vue'
 import LogsView from '@/view/home/LogsView.vue'
@@ -16,6 +17,10 @@ const routes = [
     {
         path: '/home',
         component: DashboardView
+    },
+    {
+        path: '/seasons',
+        component: SeasonCatalogView
     },
     {
         path: '/subscriptions',

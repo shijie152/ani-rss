@@ -38,9 +38,6 @@ import java.util.UUID;
 public class ConfigService {
 
     @Resource
-    private AfdianService afdianService;
-
-    @Resource
     private ClearService clearService;
 
     @Resource
@@ -54,7 +51,7 @@ public class ConfigService {
         Config config = ObjectUtil.clone(ConfigUtil.CONFIG);
         config.getLogin().setPassword("");
         config.setVersion(version)
-                .setGitInfo(getGitInfo()).setVerifyExpirationTime(afdianService.verifyExpirationTime()).setJwtKey("");
+                .setGitInfo(getGitInfo()).setJwtKey("");
         return config;
     }
 
@@ -75,8 +72,7 @@ public class ConfigService {
         String download = config.getDownloadToolType();
         Boolean autoStart = config.getAutoStart();
 
-        newConfig.setExpirationTime(null)
-                .setOutTradeNo(null).setTryOut(null).setJwtKey(null);
+        newConfig.setJwtKey(null);
 
         CopyOptions copyOptions = CopyOptions
                 .create()

@@ -16,6 +16,12 @@
           </el-icon>
           <span>首页</span>
         </el-menu-item>
+        <el-menu-item index="/seasons">
+          <el-icon>
+            <Calendar/>
+          </el-icon>
+          <span>季度</span>
+        </el-menu-item>
         <el-menu-item index="/subscriptions">
           <el-icon>
             <Collection/>
@@ -55,7 +61,7 @@
 <script setup>
 import {onMounted} from "vue";
 import {RouterView, useRoute} from "vue-router";
-import {Collection, Download, House, Setting, Tickets} from "@element-plus/icons-vue";
+import {Calendar, Collection, Download, House, Setting, Tickets} from "@element-plus/icons-vue";
 import {initLayout} from "@/js/global.js";
 
 const route = useRoute()

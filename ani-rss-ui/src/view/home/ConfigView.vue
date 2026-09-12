@@ -32,7 +32,6 @@
               <ProxyView v-else-if="tab.name === 'proxy'" v-model:config="config"/>
               <LoginConfigView v-else-if="tab.name === 'login'" :config="config"/>
               <NotificationView v-else-if="tab.name === 'notification'" v-model:config="config"/>
-              <AfdianView v-else-if="tab.name === 'afdian'" :config="config"/>
               <AboutView v-else-if="tab.name === 'about'" :config="config"/>
             </div>
           </el-scrollbar>
@@ -53,7 +52,6 @@ import DownloadView from "@/view/config/DownloadView.vue";
 import BasicView from "@/view/config/BasicView.vue";
 import AboutView from "@/view/config/AboutView.vue";
 import LoginConfigView from "@/view/config/LoginConfigView.vue";
-import AfdianView from "@/view/config/AfdianView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import {configData} from "@/js/config.js";
 import * as http from "@/js/http.js";
@@ -71,7 +69,6 @@ const tabs = [
   {name: 'proxy', label: '代理设置', description: '网络代理与连接配置'},
   {name: 'login', label: '登录设置', description: '账号与访问安全'},
   {name: 'notification', label: '通知', description: '消息渠道与事件通知'},
-  {name: 'afdian', label: '捐赠', description: '支持项目持续维护'},
   {name: 'about', label: '关于', description: '版本信息与项目链接'}
 ]
 const activeDescription = computed(() => tabs.find(tab => tab.name === activeName.value)?.description || '')

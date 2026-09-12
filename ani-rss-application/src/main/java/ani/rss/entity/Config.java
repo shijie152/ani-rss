@@ -557,30 +557,6 @@ public class Config implements Serializable {
     private Long dlLimit;
 
     /**
-     * 捐赠过期时间
-     */
-    @Schema(description = "捐赠过期时间")
-    private Long expirationTime;
-
-    /**
-     * 爱发电订单号
-     */
-    @Schema(description = "爱发电订单号")
-    private String outTradeNo;
-
-    /**
-     * 捐赠或试用是否过期
-     */
-    @Schema(description = "捐赠或试用是否过期")
-    private Boolean verifyExpirationTime;
-
-    /**
-     * 试用
-     */
-    @Schema(description = "试用")
-    private Boolean tryOut;
-
-    /**
      * 摸鱼
      */
     @Schema(description = "摸鱼")

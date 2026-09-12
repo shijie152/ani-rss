@@ -15,7 +15,6 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.StrUtil;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
@@ -53,7 +52,6 @@ public class AnimeGardenService {
             return weekList;
         }
 
-        JsonObject bgmScore = cacheService.getBgmScore();
         JsonObject bgmCover = cacheService.getBgmCover();
 
         List<String> bgmIdList = AniUtil.ANI_LIST
@@ -76,10 +74,6 @@ public class AnimeGardenService {
                 .peek(subject -> {
                     String id = subject.getId();
 
-                    Double score = Optional.ofNullable(bgmScore.get(id))
-                            .map(JsonElement::getAsDouble)
-                            .orElse(0.0);
-
                     String cover = Optional.ofNullable(bgmCover.get(id))
                             .map(it -> GsonStatic.fromJson(it, BgmInfo.Images.class))
                             .map(BgmInfo.Images::getSmall)
@@ -88,11 +82,9 @@ public class AnimeGardenService {
                     boolean exists = bgmIdList.contains(subject.getId());
 
                     subject
-                            .setScore(score)
                             .setCover(cover)
                             .setExists(exists);
                 })
-                .sorted(Comparator.comparingDouble(AnimeGarden.Subject::getScore).reversed())
                 .toList();
 
         List<String> weeks = List.of("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六");

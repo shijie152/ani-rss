@@ -212,6 +212,20 @@ const show = () => {
   rssButtonLoading.value = false
 }
 
+const showWithRss = (rss) => {
+  ani.value = JSON.parse(JSON.stringify(aniData))
+  activeName.value = rss.type || 'mikan'
+  ani.value.type = activeName.value
+  ani.value.url = rss.url || ''
+  ani.value.bgmUrl = rss.bgmUrl || ''
+  ani.value.subgroup = rss.subgroup || ''
+  ani.value.match = []
+  showRss.value = true
+  dialogVisible.value = true
+  rssButtonLoading.value = false
+  getRss()
+}
+
 let bgmCallback = it => {
   ani.value.title = it['name_cn'] ? it['name_cn'] : it['name']
   ani.value.bgmUrl = it.url
@@ -227,7 +241,7 @@ let rssCallback = v => {
   getRss()
 }
 
-defineExpose({show})
+defineExpose({show, showWithRss})
 </script>
 
 <style scoped>

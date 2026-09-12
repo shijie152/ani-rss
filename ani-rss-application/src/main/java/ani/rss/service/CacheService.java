@@ -1,116 +1,14 @@
 package ani.rss.service;
 
 import ani.rss.commons.GsonStatic;
-import ani.rss.entity.Config;
-import ani.rss.entity.MikanBgm;
 import ani.rss.util.basic.HttpReq;
-import ani.rss.util.other.ConfigUtil;
-import cn.hutool.core.text.StrFormatter;
-import cn.hutool.core.util.StrUtil;
-import cn.hutool.crypto.SecureUtil;
 import com.google.gson.JsonObject;
-import com.google.gson.reflect.TypeToken;
-import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-
-import java.lang.reflect.Type;
-import java.util.HashMap;
-import java.util.Map;
 
 @Slf4j
 @Service
 public class CacheService {
-
-    @Resource
-    private AfdianService afdianService;
-
-    /**
-     * k: Bgm Id, v: Bgm Score
-     *
-     * @return JsonObject
-     */
-    public JsonObject getBgmScore() {
-        return getScore("bgm");
-    }
-
-    /**
-     * k: Mikan Id, v: Bgm Score
-     *
-     * @return JsonObject
-     */
-    public JsonObject getMikanScore() {
-        return getScore("mikan");
-    }
-
-    public JsonObject getScore(String source) {
-        if (!afdianService.verifyExpirationTime()) {
-            return new JsonObject();
-        }
-        Config config = ConfigUtil.CONFIG;
-        String outTradeNo = config.getOutTradeNo();
-        boolean tryOut = config.getTryOut();
-        if (StrUtil.isBlank(outTradeNo) || tryOut) {
-            return new JsonObject();
-        }
-
-        JsonObject jsonObject = new JsonObject();
-        try {
-            String url = StrFormatter.format(
-                    "https://cache.wushuo.top/{}/score/{}",
-                    source,
-                    SecureUtil.sha256(outTradeNo)
-            );
-            jsonObject = HttpReq.get(url)
-                    .timeout(1000 * 5)
-                    .thenFunction(res -> {
-                        int status = res.getStatus();
-                        if (status == 404) {
-                            return new JsonObject();
-                        }
-                        HttpReq.assertStatus(res);
-                        return GsonStatic.fromJson(res.body(), JsonObject.class);
-                    });
-        } catch (Exception e) {
-            log.error(e.getMessage(), e);
-        }
-        return jsonObject;
-    }
-
-    public Map<String, MikanBgm> getMikanBgm() {
-        if (!afdianService.verifyExpirationTime()) {
-            return new HashMap<>();
-        }
-        Config config = ConfigUtil.CONFIG;
-        String outTradeNo = config.getOutTradeNo();
-        boolean tryOut = config.getTryOut();
-        if (StrUtil.isBlank(outTradeNo) || tryOut) {
-            return new HashMap<>();
-        }
-
-        Map<String, MikanBgm> mikanBgmMap = new HashMap<>();
-        try {
-            String url = StrFormatter.format(
-                    "https://cache.wushuo.top/mikan/bgm/{}",
-                    SecureUtil.sha256(outTradeNo)
-            );
-            Type type = new TypeToken<HashMap<String, MikanBgm>>() {
-            }.getType();
-            mikanBgmMap = HttpReq.get(url)
-                    .timeout(1000 * 5)
-                    .thenFunction(res -> {
-                        int status = res.getStatus();
-                        if (status == 404) {
-                            return new HashMap<>();
-                        }
-                        HttpReq.assertStatus(res);
-                        return GsonStatic.fromJson(res.body(), type);
-                    });
-        } catch (Exception e) {
-            log.error(e.getMessage(), e);
-        }
-        return mikanBgmMap;
-    }
 
     public JsonObject getBgmCover() {
         JsonObject jsonObject = new JsonObject();
