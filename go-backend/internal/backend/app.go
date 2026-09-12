@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
@@ -368,8 +369,23 @@ func (a *App) updateTotalEpisodeNumber(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "强制参数异常")
 		return
 	}
-	if err := a.subscriptions.UpdateProgress(force, ids); err != nil {
-		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+	client, err := a.sourceClient()
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
+		return
+	}
+	resolve := func(_ context.Context, item model.Ani) (int, error) {
+		id := source.SubjectID(item.BGMURL)
+		if id == "" {
+			return 0, errors.New("订阅没有 Bangumi subject")
+		}
+		return client.SubjectEpisodeCount(id)
+	}
+	if err := a.subscriptions.UpdateTotalEpisodes(r.Context(), force, ids, resolve); err != nil {
+		a.logger.Warn("total episode update partially failed", "error", err)
+		// Java starts this operation asynchronously and keeps the UI action
+		// successful even when one subject cannot be read.
+		writeResult(w, http.StatusOK, map[string]any{"error": err.Error()}, "已开始更新总集数")
 		return
 	}
 	writeResult(w, http.StatusOK, nil, "已开始更新总集数")
@@ -600,7 +616,12 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 	if username == "" {
 		apiKey = password
 	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: &downloader.QBittorrent{Host: appconfig.String(cfg, "downloadToolHost"), Username: username, Password: password, APIKey: apiKey, Client: client}}, nil
+	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: &downloader.QBittorrent{
+		Host: appconfig.String(cfg, "downloadToolHost"), Username: username, Password: password, APIKey: apiKey, Client: client,
+		ContentLayout: appconfig.String(cfg, "qbContentLayout"), UseDownloadPath: appconfig.Bool(cfg, "qbUseDownloadPath"),
+		RatioLimit: int64(appconfig.Int(cfg, "ratioLimit")), SeedingTimeLimit: int64(appconfig.Int(cfg, "seedingTimeLimit")),
+		InactiveSeedingTimeLimit: int64(appconfig.Int(cfg, "inactiveSeedingTimeLimit")), UpLimit: int64(appconfig.Int(cfg, "upLimit")) * 1024, DlLimit: int64(appconfig.Int(cfg, "dlLimit")) * 1024,
+	}}, nil
 }
 
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
@@ -1038,7 +1059,11 @@ func (a *App) getSubtitles(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		filename = a.resolveFilePath(filename)
 		if _, statErr := os.Stat(filename); statErr == nil && media.IsVideo(filename) && a.allowedMediaPath(filename) {
-			writeResult(w, http.StatusOK, media.SubtitlesFor(filename), "success")
+			subtitles := media.SubtitlesFor(filename)
+			if embedded, embeddedErr := media.EmbeddedSubtitles(filename); embeddedErr == nil {
+				subtitles = append(subtitles, embedded...)
+			}
+			writeResult(w, http.StatusOK, subtitles, "success")
 			return
 		}
 		err = errors.New("视频文件不存在")

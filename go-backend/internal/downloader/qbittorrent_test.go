@@ -85,3 +85,35 @@ func TestQBittorrentUsernamePasswordLoginAndFiltersForeignTasks(t *testing.T) {
 		t.Fatalf("filtered items = %#v, err = %v", items, err)
 	}
 }
+
+func TestQBittorrentAddCarriesJavaDownloadParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/torrents/add" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		expected := map[string]string{
+			"addToTopOfQueue": "false", "autoTMM": "false", "category": "ani-rss",
+			"contentLayout": "Subfolder", "dlLimit": "2048", "firstLastPiecePrio": "false",
+			"rename": "Demo S01E01", "savepath": "/media", "sequentialDownload": "false",
+			"skip_checking": "false", "stopCondition": "None", "upLimit": "1024",
+			"useDownloadPath": "true", "tags": "ani-rss,Group", "ratioLimit": "1",
+			"seedingTimeLimit": "3600", "inactiveSeedingTimeLimit": "7200",
+			"paused": "false", "stopped": "false", "urls": "magnet:?xt=urn:btih:abc",
+		}
+		for key, value := range expected {
+			if got := r.Form.Get(key); got != value {
+				t.Errorf("form[%q] = %q, want %q", key, got, value)
+			}
+		}
+		_, _ = w.Write([]byte("Ok"))
+	}))
+	defer server.Close()
+	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test", ContentLayout: "Subfolder", UseDownloadPath: true, UpLimit: 1024, DlLimit: 2048, RatioLimit: 1, SeedingTimeLimit: 3600, InactiveSeedingTimeLimit: 7200, Rename: "Demo S01E01"}
+	if err := adapter.Add(context.Background(), model.Resource{Title: "Demo", Magnet: "magnet:?xt=urn:btih:abc"}, "/media", []string{"ani-rss", "Group"}, false); err != nil {
+		t.Fatal(err)
+	}
+}

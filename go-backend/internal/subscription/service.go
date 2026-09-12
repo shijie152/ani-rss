@@ -3,6 +3,7 @@
 package subscription
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mozillazg/go-pinyin"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
@@ -42,10 +45,15 @@ func (s *Service) List() model.ListAni {
 	s.mu.RUnlock()
 	for index := range items {
 		items[index] = normalizeAni(items[index])
+		items[index].Pinyin, items[index].PinyinInitials = titlePinyin(items[index].Title)
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		sortType := strings.ToUpper(appconfig.String(s.config.Snapshot(), "sortType"))
 		switch sortType {
+		case "PINYIN":
+			if items[i].Pinyin != items[j].Pinyin {
+				return items[i].Pinyin < items[j].Pinyin
+			}
 		case "DOWNLOAD_TIME":
 			return items[i].LastDownloadTime > items[j].LastDownloadTime
 		case "SCORE":
@@ -60,23 +68,75 @@ func (s *Service) List() model.ListAni {
 	for _, week := range weeks {
 		weekMap[week] = []model.Ani{}
 	}
-	months := make([]string, 0)
-	seenMonths := map[string]bool{}
+	monthTimes := map[string]time.Time{}
 	for index := range items {
 		items[index].Sort = index
 		date := parseReleaseDate(items[index])
 		month := date.Format("2006-01")
-		if !seenMonths[month] {
-			months = append(months, month)
-			seenMonths[month] = true
-		}
+		monthTimes[month] = time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, time.Local)
 		weekMap[weeks[int(date.Weekday())]] = append(weekMap[weeks[int(date.Weekday())]], items[index])
 	}
+	months := make([]string, 0, len(monthTimes))
+	for month := range monthTimes {
+		months = append(months, month)
+	}
+	sort.Slice(months, func(i, j int) bool { return monthTimes[months[i]].After(monthTimes[months[j]]) })
 	resultWeeks := make([]model.WeekAni, 0, len(weeks))
-	for _, week := range weeks {
+	for _, week := range weekOrder(time.Now().Weekday()) {
 		resultWeeks = append(resultWeeks, model.WeekAni{WeekLabel: week, Items: weekMap[week]})
 	}
 	return model.ListAni{ReleaseDateList: months, WeekList: resultWeeks, Total: len(items)}
+}
+
+// EpisodeResolver is injected so total-episode updates remain deterministic
+// in tests and the subscription domain does not own external HTTP details.
+type EpisodeResolver func(context.Context, model.Ani) (int, error)
+
+// UpdateTotalEpisodes mirrors Java's manual update: without force an existing
+// total is retained; otherwise Bangumi's eps value replaces it when present.
+func (s *Service) UpdateTotalEpisodes(ctx context.Context, force bool, ids []string, resolve EpisodeResolver) error {
+	if len(ids) == 0 {
+		return ErrEmptySelection
+	}
+	if resolve == nil {
+		return errors.New("总集数解析器未配置")
+	}
+	selected := map[string]bool{}
+	for _, id := range ids {
+		selected[id] = true
+	}
+	updates := map[string]int{}
+	var failures []string
+	for _, item := range s.Items() {
+		if !selected[item.ID] || (!force && item.TotalEpisodeNumber > 0) {
+			continue
+		}
+		episodes, err := resolve(ctx, item)
+		if err != nil {
+			failures = append(failures, item.ID+": "+err.Error())
+			continue
+		}
+		if episodes > 0 && episodes != item.TotalEpisodeNumber {
+			updates[item.ID] = episodes
+		}
+	}
+	if len(updates) > 0 {
+		s.mu.Lock()
+		for index := range s.items {
+			if episodes, ok := updates[s.items[index].ID]; ok {
+				s.items[index].TotalEpisodeNumber = episodes
+			}
+		}
+		err := s.saveLocked()
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (s *Service) Add(item model.Ani) error {
@@ -253,6 +313,11 @@ func (s *Service) Import(items []model.Ani, conflict string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range items {
+		// Imported JSON from older installations may not contain an id; Java
+		// assigns a fresh id for newly imported subscriptions.
+		if strings.TrimSpace(item.ID) == "" {
+			item.ID = newID()
+		}
 		if err := validate(item); err != nil {
 			return err
 		}
@@ -264,9 +329,6 @@ func (s *Service) Import(items []model.Ani, conflict string) error {
 			}
 		}
 		if found < 0 {
-			if item.ID == "" {
-				item.ID = newID()
-			}
 			s.items = append(s.items, item)
 		} else if strings.EqualFold(conflict, "SKIP") {
 			continue
@@ -321,6 +383,33 @@ func parseReleaseDate(item model.Ani) time.Time {
 		return time.Date(item.Year, time.Month(item.Month), item.Date, 0, 0, 0, 0, time.Local)
 	}
 	return time.Now()
+}
+
+func weekOrder(today time.Weekday) []string {
+	weeks := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+	result := make([]string, 0, len(weeks))
+	for day := int(today); day >= 0; day-- {
+		result = append(result, weeks[day])
+	}
+	for day := 6; day > int(today); day-- {
+		result = append(result, weeks[day])
+	}
+	return result
+}
+
+func titlePinyin(title string) (string, string) {
+	args := pinyin.NewArgs()
+	args.Style = pinyin.Normal
+	full, initials := strings.Builder{}, strings.Builder{}
+	for _, syllable := range pinyin.Pinyin(title, args) {
+		if len(syllable) == 0 || syllable[0] == "" {
+			continue
+		}
+		value := strings.ToLower(syllable[0])
+		full.WriteString(value)
+		initials.WriteString(string([]rune(value)[0]))
+	}
+	return full.String(), initials.String()
 }
 
 func pathFor(cfg model.Config, item model.Ani, override string) (string, error) {

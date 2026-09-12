@@ -1,6 +1,7 @@
 package media_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/at-wat/ebml-go"
+	"github.com/at-wat/ebml-go/webm"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/media"
@@ -28,7 +32,7 @@ func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
 				"poster_path": "/poster.jpg", "backdrop_path": "/fanart.jpg",
 			})
 		case r.URL.Path == "/3/tv/42/season/1":
-			_ = json.NewEncoder(w).Encode(map[string]any{"episodes": []any{map[string]any{"episode_number": 1, "name": "Pilot", "overview": "pilot", "air_date": "2024-01-01"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"episodes": []any{map[string]any{"episode_number": 1, "name": "Pilot", "overview": "pilot", "air_date": "2024-01-01", "still_path": "/still.jpg"}}})
 		case strings.HasPrefix(r.URL.Path, "/t/p/original/"):
 			w.Header().Set("Content-Type", "image/jpeg")
 			_, _ = w.Write([]byte("image"))
@@ -86,9 +90,79 @@ func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "poster.jpg")); err != nil {
 		t.Fatalf("poster missing: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(path, "[Group] Demo S01E01-thumb.jpg")); err != nil {
+		t.Fatalf("episode still missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "season01-poster.jpg")); err != nil {
+		t.Fatalf("season poster missing: %v", err)
+	}
 	files, err := service.List(path)
 	if err != nil || len(files) != 1 || len(files[0].Subtitles) != 1 {
 		t.Fatalf("files = %#v, err = %v", files, err)
+	}
+	if _, err := service.Scrape(context.Background(), &ani, false); err != nil {
+		t.Fatalf("idempotent scrape failed: %v", err)
+	}
+	duplicate := filepath.Join(path, "[Group] Demo - 01 [1080p].copy.mkv")
+	if err := os.WriteFile(duplicate, []byte("duplicate"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Scrape(context.Background(), &ani, false); err == nil {
+		t.Fatal("existing target was silently overwritten")
+	}
+	if _, err := os.Stat(duplicate); err != nil {
+		t.Fatalf("duplicate source was lost: %v", err)
+	}
+
+	completedSource := t.TempDir()
+	if err := os.WriteFile(filepath.Join(completedSource, "[Group] Demo 01.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	completedTarget := t.TempDir()
+	if err := config.Update(model.Config{"autoDisabled": true, "completed": true}); err != nil {
+		t.Fatal(err)
+	}
+	completedService := media.New(config, client, server.Client(), func(model.Ani) (string, error) { return completedSource, nil })
+	completedService.ConfigDir = t.TempDir()
+	completedService.ResolveOther = func(model.Ani, string) (string, error) { return completedTarget, nil }
+	completedAni := ani
+	completedAni.Completed = true
+	completedAni.Enable = false
+	completedAni.CurrentEpisodeNumber = 1
+	completedAni.TotalEpisodeNumber = 1
+	completedResult, err := completedService.Scrape(context.Background(), &completedAni, true)
+	if err != nil {
+		t.Fatalf("completed scrape failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(completedTarget, "[Group] Demo S01E01.mkv")); err != nil {
+		t.Fatalf("completed media was not moved: %v result=%#v source=%s target=%s", err, completedResult, completedSource, completedTarget)
+	}
+	if _, err := os.Stat(completedSource); !os.IsNotExist(err) {
+		t.Fatalf("completed source directory still exists, err=%v", err)
+	}
+}
+
+func TestEmbeddedMatroskaTextSubtitlesAreReturnedAsVTT(t *testing.T) {
+	var data bytes.Buffer
+	document := struct {
+		Segment webm.Segment `ebml:"Segment"`
+	}{Segment: webm.Segment{
+		Tracks:  webm.Tracks{TrackEntry: []webm.TrackEntry{{TrackNumber: 1, TrackType: 17, CodecID: "S_TEXT/UTF8", Name: "简体中文"}}},
+		Cluster: []webm.Cluster{{SimpleBlock: []ebml.Block{{TrackNumber: 1, Data: [][]byte{[]byte("你好")}}}}},
+	}}
+	if err := ebml.Marshal(&document, &data); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "embedded.mkv")
+	if err := os.WriteFile(path, data.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subtitles, err := media.EmbeddedSubtitles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subtitles) != 1 || subtitles[0].Name != "简体中文" || !strings.Contains(subtitles[0].Content, "WEBVTT") || !strings.Contains(subtitles[0].Content, "你好") {
+		t.Fatalf("embedded subtitles = %#v", subtitles)
 	}
 }
 

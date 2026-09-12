@@ -21,9 +21,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/at-wat/ebml-go"
+	"github.com/at-wat/ebml-go/webm"
+
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 )
 
 type PathResolver func(model.Ani) (string, error)
@@ -55,10 +59,16 @@ type mediaIdentity struct {
 	HasEp   bool
 }
 
+type embeddedSubtitleTrack struct {
+	name  string
+	codec string
+	lines []string
+}
+
 var (
 	seasonEpisodePattern = regexp.MustCompile(`(?i)(?:^|[^a-z])s(\d{1,3})[ ._-]*e(\d+(?:\.5)?)(?:[^0-9]|$)`)
 	episodePattern       = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:e|ep|episode|第)[ ._-]*(\d+(?:\.5)?)(?:[^0-9]|$)`)
-	bracketEpisode       = regexp.MustCompile(`(?:\[|\s|-)(\d+(?:\.5)?)(?:\]|\s|$)`)
+	bracketEpisode       = regexp.MustCompile(`(?:\[|\s|-)(\d+(?:\.5)?)(?:\]|\s|\.|$)`)
 )
 
 func New(config appconfig.Reader, metadataClient *metadata.Client, client *http.Client, resolver PathResolver) *Service {
@@ -184,6 +194,147 @@ func (s *Service) PlaybackList(path string) ([]model.MediaFile, error) {
 // response and the file player endpoint.
 func SubtitlesFor(videoPath string) []model.SubtitleInfo { return subtitlesFor(videoPath) }
 
+// EmbeddedSubtitles reads text subtitle tracks from a Matroska file. The
+// current Java player exposes these tracks as VTT, so the Go boundary returns
+// the same content-oriented shape. Other containers intentionally return an
+// empty list and continue to use sidecar subtitles.
+func EmbeddedSubtitles(videoPath string) ([]model.SubtitleInfo, error) {
+	if strings.ToLower(filepath.Ext(videoPath)) != ".mkv" {
+		return []model.SubtitleInfo{}, nil
+	}
+	file, err := os.Open(videoPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var document struct {
+		Segment webm.Segment `ebml:"Segment"`
+	}
+	if err := ebml.Unmarshal(file, &document, ebml.WithIgnoreUnknown(true), ebml.WithMaxLeafElementSize(64<<20)); err != nil {
+		return nil, err
+	}
+	tracks := map[uint64]*embeddedSubtitleTrack{}
+	order := []uint64{}
+	for _, entry := range document.Segment.Tracks.TrackEntry {
+		if entry.TrackType != 17 || !isTextSubtitleCodec(entry.CodecID) {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = fmt.Sprintf("字幕 %d", entry.TrackNumber)
+		}
+		tracks[entry.TrackNumber] = &embeddedSubtitleTrack{name: name, codec: entry.CodecID}
+		order = append(order, entry.TrackNumber)
+	}
+	for _, cluster := range document.Segment.Cluster {
+		for _, block := range cluster.SimpleBlock {
+			appendSubtitleBlocks(tracks, cluster.Timecode, block)
+		}
+		for _, group := range cluster.BlockGroup {
+			appendSubtitleBlocks(tracks, cluster.Timecode, group.Block)
+		}
+	}
+	result := make([]model.SubtitleInfo, 0, len(order))
+	for _, number := range order {
+		item := tracks[number]
+		if item == nil || len(item.lines) == 0 {
+			continue
+		}
+		result = append(result, model.SubtitleInfo{Name: item.name, HTML: item.name, Content: "WEBVTT\n\n" + strings.Join(item.lines, "\n\n") + "\n", Type: "vtt"})
+	}
+	return result, nil
+}
+
+func appendSubtitleBlocks(tracks map[uint64]*embeddedSubtitleTrack, cluster uint64, block ebml.Block) {
+	item := tracks[block.TrackNumber]
+	if item == nil {
+		return
+	}
+	for _, frame := range block.Data {
+		text := strings.TrimSpace(string(frame))
+		if text == "" {
+			continue
+		}
+		start := int64(cluster) + int64(block.Timecode)
+		if start < 0 {
+			start = 0
+		}
+		end := start + 5000
+		if strings.Contains(strings.ToUpper(item.codec), "ASS") {
+			if assStart, assEnd, assText, ok := parseASSDialogue(text); ok {
+				item.lines = append(item.lines, assStart+" --> "+assEnd+"\n"+assText)
+				continue
+			}
+		}
+		item.lines = append(item.lines, timestampMilliseconds(start)+" --> "+timestampMilliseconds(end)+"\n"+text)
+	}
+}
+
+func isTextSubtitleCodec(codec string) bool {
+	codec = strings.ToUpper(strings.TrimSpace(codec))
+	return codec == "S_TEXT/UTF8" || codec == "S_TEXT/ASS" || codec == "S_TEXT/SSA" || codec == "S_TEXT/WEBVTT"
+}
+
+func parseASSDialogue(value string) (string, string, string, bool) {
+	if !strings.HasPrefix(strings.ToLower(value), "dialogue:") {
+		return "", "", "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(value[len("dialogue:"):]), ",", 10)
+	if len(parts) != 10 {
+		return "", "", "", false
+	}
+	start, startOK := assTimestamp(parts[1])
+	end, endOK := assTimestamp(parts[2])
+	text := strings.TrimSpace(strings.ReplaceAll(parts[9], "\\N", "\n"))
+	return start, end, text, startOK && endOK && text != ""
+}
+
+func assTimestamp(value string) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 3 {
+		return "", false
+	}
+	hours, err1 := strconv.Atoi(parts[0])
+	minutes, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return "", false
+	}
+	seconds := parts[2]
+	wholeText, fraction := seconds, ""
+	if dot := strings.IndexByte(seconds, '.'); dot >= 0 {
+		wholeText, fraction = seconds[:dot], seconds[dot+1:]
+	}
+	whole, err3 := strconv.Atoi(wholeText)
+	if err3 != nil {
+		return "", false
+	}
+	millis := 0
+	if fraction != "" {
+		switch len(fraction) {
+		case 1:
+			millis, err3 = strconv.Atoi(fraction)
+			millis *= 100
+		case 2:
+			millis, err3 = strconv.Atoi(fraction)
+			millis *= 10
+		default:
+			millis, err3 = strconv.Atoi(fraction[:3])
+		}
+		if err3 != nil {
+			return "", false
+		}
+	}
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, minutes, whole, millis), true
+}
+
+func timestampMilliseconds(value int64) string {
+	hours := value / 3600000
+	minutes := (value % 3600000) / 60000
+	seconds := (value % 60000) / 1000
+	millis := value % 1000
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)
+}
+
 func IsVideo(name string) bool { return isVideo(name) }
 func IsSupported(name string) bool {
 	return isVideo(name) || isSubtitle(name) || hasExt(name, map[string]bool{"jpg": true, "jpeg": true, "png": true, "webp": true, "svg": true})
@@ -292,6 +443,12 @@ func (s *Service) processDirectory(path string, ani model.Ani, metadataValue mod
 		if err := s.writeNFO(filepath.Dir(target), target, ani, metadataValue, identity, force); err != nil {
 			errorsFound = append(errorsFound, err.Error())
 			continue
+		}
+		if !ani.OVA {
+			if err := s.writeEpisodeAssets(filepath.Dir(target), filepath.Base(target), metadataValue, identity, force); err != nil {
+				errorsFound = append(errorsFound, err.Error())
+				continue
+			}
 		}
 		processed++
 	}
@@ -404,6 +561,24 @@ func (s *Service) writeShowAssets(path string, ani model.Ani, value model.Metada
 			return err
 		}
 	}
+	if !ani.OVA && value.Poster != "" {
+		seasonPoster := filepath.Join(path, fmt.Sprintf("season%02d-poster%s", ani.Season, imageExt(value.Poster)))
+		if err := s.saveImage(value.Poster, seasonPoster, force); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) writeEpisodeAssets(directory, videoName string, value model.Metadata, identity mediaIdentity, force bool) error {
+	for _, episode := range value.EpisodeInfo {
+		if float64(episode.Number) != identity.Episode || strings.TrimSpace(episode.Still) == "" {
+			continue
+		}
+		base := strings.TrimSuffix(videoName, filepath.Ext(videoName))
+		target := filepath.Join(directory, base+"-thumb"+imageExt(episode.Still))
+		return s.saveImage(episode.Still, target, force)
+	}
 	return nil
 }
 
@@ -510,7 +685,7 @@ func customEpisode(name, expression string, group int) (float64, bool) {
 	if strings.TrimSpace(expression) == "" || group < 1 {
 		return 0, false
 	}
-	pattern, err := regexp.Compile(strings.ReplaceAll(expression, "(?:", "("))
+	pattern, group, err := regexutil.CompileCapturePattern(expression, group)
 	if err != nil {
 		return 0, false
 	}
@@ -792,6 +967,7 @@ type episodeNFOXML struct {
 	Plot    string   `xml:"plot,omitempty"`
 	Rating  float64  `xml:"rating,omitempty"`
 	Aired   string   `xml:"aired,omitempty"`
+	Thumb   string   `xml:"thumb,omitempty"`
 	Episode int      `xml:"episode"`
 	Season  int      `xml:"season"`
 }
@@ -815,7 +991,7 @@ func seasonNFO(v model.Metadata, season int) seasonNFOXML {
 func episodeNFO(v model.Metadata, id mediaIdentity, season int) episodeNFOXML {
 	for _, e := range v.EpisodeInfo {
 		if e.Number == int(id.Episode) {
-			return episodeNFOXML{Title: e.Name, Plot: e.Overview, Aired: e.AirDate, Episode: e.Number, Season: season, Rating: v.Score}
+			return episodeNFOXML{Title: e.Name, Plot: e.Overview, Aired: e.AirDate, Thumb: e.Still, Episode: e.Number, Season: season, Rating: v.Score}
 		}
 	}
 	return episodeNFOXML{Title: "第" + trimEpisode(id.Episode) + "集", Episode: int(id.Episode), Season: season, Rating: v.Score}

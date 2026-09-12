@@ -327,6 +327,19 @@ func (c *Client) BangumiSubject(id string) (map[string]any, error) {
 	return result, nil
 }
 
+// SubjectEpisodeCount returns Bangumi's eps field for manual progress updates.
+func (c *Client) SubjectEpisodeCount(id string) (int, error) {
+	info, err := c.BangumiSubject(id)
+	if err != nil {
+		return 0, err
+	}
+	episodes := int(number(info["eps"]))
+	if episodes < 1 {
+		return 0, errors.New("Bangumi subject 缺少 eps")
+	}
+	return episodes, nil
+}
+
 func (c *Client) SubscriptionFromSubject(id string) (model.Ani, error) {
 	info, err := c.BangumiSubject(id)
 	if err != nil {
@@ -615,16 +628,12 @@ func absolute(base, value string) string {
 	return origin.ResolveReference(parsed).String()
 }
 func formatSize(size int64) string {
-	const unit = int64(1024)
-	if size < unit {
-		return strconv.FormatInt(size, 10) + " B"
-	}
-	value, suffix := float64(size), "KB"
-	for _, next := range []string{"MB", "GB", "TB"} {
-		if value < float64(unit) {
+	value, suffix := float64(size), "B"
+	for _, next := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		if value < 1024 {
 			break
 		}
-		value /= float64(unit)
+		value /= 1024
 		suffix = next
 	}
 	return fmt.Sprintf("%.2f %s", value, suffix)

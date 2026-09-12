@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 )
 
 type MatchOptions struct {
@@ -103,7 +104,7 @@ func customEpisode(title, expression string, group int) (float64, bool) {
 	// Java's configured patterns commonly use non-capturing groups. Go's RE2
 	// syntax does not support (?:...), but replacing them with ordinary groups
 	// preserves the configured capture indexes used by the default rule.
-	pattern, err := regexp.Compile(strings.ReplaceAll(expression, "(?:", "("))
+	pattern, group, err := regexutil.CompileCapturePattern(expression, group)
 	if err != nil {
 		return 0, false
 	}

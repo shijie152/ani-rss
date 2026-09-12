@@ -22,6 +22,13 @@ import (
 
 type QBittorrent struct {
 	Host, Username, Password, APIKey string
+	ContentLayout                    string
+	UseDownloadPath                  bool
+	RatioLimit                       int64
+	SeedingTimeLimit                 int64
+	InactiveSeedingTimeLimit         int64
+	UpLimit, DlLimit                 int64
+	Rename                           string
 	Client                           *http.Client
 	mu                               sync.RWMutex
 	sessionCookie                    string
@@ -87,7 +94,33 @@ func (q *QBittorrent) Login(ctx context.Context) error {
 }
 
 func (q *QBittorrent) Add(ctx context.Context, resource model.Resource, savePath string, tags []string, paused bool) error {
-	form := url.Values{"savepath": []string{savePath}, "category": []string{"ani-rss"}, "tags": []string{strings.Join(tags, ",")}, "paused": []string{strconv.FormatBool(paused)}, "stopped": []string{strconv.FormatBool(paused)}}
+	contentLayout := q.ContentLayout
+	if contentLayout == "" {
+		contentLayout = "Original"
+	}
+	form := url.Values{
+		"addToTopOfQueue":          []string{"false"},
+		"autoTMM":                  []string{"false"},
+		"category":                 []string{"ani-rss"},
+		"contentLayout":            []string{contentLayout},
+		"dlLimit":                  []string{strconv.FormatInt(q.DlLimit, 10)},
+		"firstLastPiecePrio":       []string{"false"},
+		"savepath":                 []string{savePath},
+		"sequentialDownload":       []string{"false"},
+		"skip_checking":            []string{"false"},
+		"stopCondition":            []string{"None"},
+		"upLimit":                  []string{strconv.FormatInt(q.UpLimit, 10)},
+		"useDownloadPath":          []string{strconv.FormatBool(q.UseDownloadPath)},
+		"tags":                     []string{strings.Join(tags, ",")},
+		"ratioLimit":               []string{strconv.FormatInt(q.RatioLimit, 10)},
+		"seedingTimeLimit":         []string{strconv.FormatInt(q.SeedingTimeLimit, 10)},
+		"inactiveSeedingTimeLimit": []string{strconv.FormatInt(q.InactiveSeedingTimeLimit, 10)},
+		"paused":                   []string{strconv.FormatBool(paused)},
+		"stopped":                  []string{strconv.FormatBool(paused)},
+	}
+	if q.Rename != "" {
+		form.Set("rename", q.Rename)
+	}
 	if resource.Magnet != "" {
 		form.Set("urls", resource.Magnet)
 	} else {

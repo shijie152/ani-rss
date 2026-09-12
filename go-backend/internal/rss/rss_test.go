@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -126,9 +127,79 @@ func TestCoordinatorLogsInAndStartsRSSTask(t *testing.T) {
 	}
 }
 
+func TestCoordinatorUsesStandbyRSSAndKeepsOtherSubscriptionsMoving(t *testing.T) {
+	var addedTags []string
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = w.Write([]byte("v4"))
+		case "/api/v2/torrents/info":
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/v2/torrents/add":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("add form: %v", err)
+			}
+			addedTags = append(addedTags, r.Form.Get("tags"))
+			_, _ = w.Write([]byte("Ok"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer primary.Close()
+	standby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<rss><channel><item><title>[Backup] Demo E01</title><guid>backup-1</guid><enclosure url="magnet:?xt=urn:btih:BACKUP1" length="100"/></item></channel></rss>`))
+	}))
+	defer standby.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<rss><channel><item><title>[Group] Other E01</title><guid>good-1</guid><enclosure url="magnet:?xt=urn:btih:GOOD1" length="100"/></item></channel></rss>`))
+	}))
+	defer good.Close()
+
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Update(model.Config{"standbyRss": true, "downloadPathTemplate": filepath.Join(t.TempDir(), "${title}")}); err != nil {
+		t.Fatal(err)
+	}
+	services := subscription.NewService(s, config, []model.Ani{
+		{ID: "fallback", Title: "Demo", URL: primary.URL, Subgroup: "Group", StandbyRSSList: []model.StandbyRSS{{Label: "Backup", URL: standby.URL}}, Enable: true},
+		{ID: "healthy", Title: "Other", URL: good.URL, Subgroup: "Group", Enable: true},
+	})
+	coordinator := &rss.Coordinator{Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+
+	result, err := coordinator.RefreshAll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("RefreshAll error = %v", err)
+	}
+	if len(result["healthy"]) != 1 || len(addedTags) != 2 {
+		t.Fatalf("result=%#v addedTags=%#v", result, addedTags)
+	}
+	if addedTags[0] != "ani-rss,Backup,备用RSS" {
+		t.Fatalf("standby tags = %q", addedTags[0])
+	}
+}
+
 func TestCustomEpisodeRuleAndHalfEpisodeFiltering(t *testing.T) {
 	items := []model.Resource{{Title: "Demo [12]", Episode: 0}, {Title: "Demo [12.5]", Episode: 0}}
 	matched := rss.Match(items, model.Ani{CustomEpisode: true, CustomEpisodeStr: `([0-9]+)`, CustomEpisodeGroupIndex: 1}, rss.MatchOptions{SkipHalf: true, CustomEpisode: true, CustomEpisodeRE: `([0-9]+)`, CustomEpisodeIdx: 1})
+	if len(matched) != 1 || matched[0].Episode != 12 {
+		t.Fatalf("matched = %#v", matched)
+	}
+}
+
+func TestCustomEpisodeRulePreservesJavaCaptureIndexAcrossNonCapturingGroups(t *testing.T) {
+	items := []model.Resource{{Title: "Demo - 12", Episode: 0}}
+	matched := rss.Match(items, model.Ani{CustomEpisode: true, CustomEpisodeStr: `(?:Demo - )([0-9]+)`, CustomEpisodeGroupIndex: 1}, rss.MatchOptions{CustomEpisode: true, CustomEpisodeRE: `(?:Demo - )([0-9]+)`, CustomEpisodeIdx: 1})
 	if len(matched) != 1 || matched[0].Episode != 12 {
 		t.Fatalf("matched = %#v", matched)
 	}

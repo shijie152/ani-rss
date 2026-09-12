@@ -105,3 +105,86 @@ func TestAniBTAnimeGardenAndBangumiClientsTransformResults(t *testing.T) {
 		t.Fatalf("ani = %#v", ani)
 	}
 }
+
+func TestSourceClientRetriesRedirectsAndReportsNonSuccess(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Home/Search":
+			attempts++
+			if attempts < 3 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+		case "/final":
+			_, _ = w.Write([]byte(`<div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><span data-src="/cover.jpg"></span><a href="/Home/Bangumi/123">Demo</a></li></ul></div>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := source.New(source.Options{MikanHost: server.URL, Retries: 3})
+	result, err := client.Mikan("demo", nil)
+	if err != nil || result["totalItems"] != 1 || attempts != 3 {
+		t.Fatalf("retry result=%#v err=%v attempts=%d", result, err, attempts)
+	}
+
+	failingAttempts := 0
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		failingAttempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	client = source.New(source.Options{MikanHost: failing.URL, Retries: 2})
+	if _, err := client.Mikan("demo", nil); err == nil || failingAttempts != 2 || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("non-success err=%v attempts=%d", err, failingAttempts)
+	}
+}
+
+func TestSourceClientFormatsSizesWithJavaBinaryUnits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"groups":[{"slug":"group","name":"Group","items":[{"title":"Demo 01","size":2048}]}]}}`))
+	}))
+	defer server.Close()
+
+	client := source.New(source.Options{AniBTHost: server.URL})
+	groups, err := client.AniBTGroup("42")
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("groups = %#v, err = %v", groups, err)
+	}
+	items := groups[0]["items"].([]any)
+	if got := items[0].(map[string]any)["formatSize"]; got != "2.00 KiB" {
+		t.Fatalf("formatSize = %#v", got)
+	}
+}
+
+func TestSourceClientsReturnDiagnosableEmptyResultsForMissingFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Home/Search":
+			_, _ = w.Write([]byte(`<html><body>no results</body></html>`))
+		case "/api/seasons/anime":
+			_, _ = w.Write([]byte(`{"data":{"byWeekday":[{"weekday":1,"animes":[{"bgmId":"42"}]}]}}`))
+		case "/resources":
+			_, _ = w.Write([]byte(`{"resources":[{"title":"No group","size":1024}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := source.New(source.Options{MikanHost: server.URL, AniBTHost: server.URL, AnimeGardenHost: server.URL})
+	mikan, err := client.Mikan("demo", nil)
+	if err != nil || mikan["totalItems"] != 0 {
+		t.Fatalf("empty Mikan = %#v, err = %v", mikan, err)
+	}
+	aniBT, err := client.AniBT(map[string]any{})
+	if err != nil || len(aniBT["byWeekday"].([]any)) != 0 {
+		t.Fatalf("missing AniBT fields = %#v, err = %v", aniBT, err)
+	}
+	groups, err := client.AnimeGardenGroup("42")
+	if err != nil || len(groups) != 0 {
+		t.Fatalf("missing AnimeGarden group = %#v, err = %v", groups, err)
+	}
+}

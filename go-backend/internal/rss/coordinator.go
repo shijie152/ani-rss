@@ -291,6 +291,9 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		if resource.Subgroup != "" {
 			tags = append(tags, resource.Subgroup)
 		}
+		if !resource.Master {
+			tags = append(tags, "备用RSS")
+		}
 		// RSS resources are submitted by URL/magnet. Java starts these tasks
 		// immediately; rename is performed after completion, so pausing here
 		// would leave a newly submitted task idle forever.
