@@ -97,6 +97,28 @@ public final class RuntimeOwnership {
         }
     }
 
+    /**
+     * Returns whether this Java process is the current state writer. A missing
+     * lock is treated as the legacy single-runtime case so older standalone
+     * Java launches keep their existing behaviour.
+     */
+    public static boolean javaOwnsState() {
+        Path path = ConfigUtil.getConfigDir().toPath().resolve("locks/runtime-state.lock");
+        if (!Files.exists(path)) {
+            return true;
+        }
+        try {
+            String payload = Files.readString(path, StandardCharsets.UTF_8);
+            Matcher pid = PID_PATTERN.matcher(payload);
+            Matcher owner = OWNER_PATTERN.matcher(payload);
+            return pid.find() && owner.find()
+                    && Long.parseLong(pid.group(1)) == ProcessHandle.current().pid()
+                    && "java".equals(owner.group(1));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static String safe(String value) {
         StringBuilder result = new StringBuilder(value.length());
         for (int i = 0; i < value.length(); i++) {

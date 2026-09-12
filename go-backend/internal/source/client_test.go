@@ -44,8 +44,45 @@ func TestMikanSearchAndGroupParseHTMLFixture(t *testing.T) {
 	if len(groups) != 1 || groups[0]["label"] != "Group" || groups[0]["bgmUrl"] != "https://bgm.tv/subject/42" {
 		t.Fatalf("groups = %#v", groups)
 	}
+	if groups[0]["updateDay"] != "today" || groups[0]["rss"] != server.URL+"/RSS/1" {
+		t.Fatalf("group UI fields = %#v", groups[0])
+	}
 	if _, ok := groups[0]["groupRegex"].(map[string]any); !ok {
 		t.Fatalf("group regex missing: %#v", groups[0])
+	}
+}
+
+func TestMikanSeasonalAndAnimeGardenUIFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/Home/BangumiCoverFlowByDayOfWeek":
+			_, _ = w.Write([]byte(`<div class="date-select"><span class="date-text">2026 春</span><div class="dropdown-menu"><ul><li>ignore</li><li><a data-year="2026" data-season="春">春</a></li></ul></div></div><div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><span data-src="/cover.jpg"></span><a href="/Home/Bangumi/123">Demo</a></li></ul></div>`))
+		case "/subjects":
+			_, _ = w.Write([]byte(`{"subjects":[{"id":"42","name":"Garden Demo","keywords":["tag"],"activedAt":"2026-01-05T00:00:00Z","isArchived":"false","score":8.3,"cover":"https://img.test/garden.jpg"}]}`))
+		case "/resources":
+			_, _ = w.Write([]byte(`{"resources":[{"title":"Old","size":1024,"createdAt":"2026-01-01T00:00:00Z","fetchedAt":"2026-01-03T00:00:00Z","fansub":{"id":"g","name":"Group"}},{"title":"New","size":2048,"createdAt":"2026-01-02T00:00:00Z","fansub":{"id":"g","name":"Group"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := source.New(source.Options{MikanHost: server.URL, AnimeGardenHost: server.URL})
+	mikan, err := client.Mikan("", map[string]any{"year": 2026, "season": "春"})
+	if err != nil || len(mikan["seasons"].([]any)) != 1 || mikan["seasons"].([]any)[0].(map[string]any)["select"] != true {
+		t.Fatalf("seasonal Mikan = %#v, err=%v", mikan, err)
+	}
+	garden, err := client.AnimeGardenList("")
+	if err != nil || len(garden) != 1 {
+		t.Fatalf("garden list = %#v, err=%v", garden, err)
+	}
+	subject := garden[0]["subjects"].([]any)[0].(map[string]any)
+	if subject["keywords"].([]any)[0] != "tag" || subject["exists"] != false || subject["weekLabel"] != "星期一" {
+		t.Fatalf("garden subject fields = %#v", subject)
+	}
+	groups, err := client.AnimeGardenGroup("42")
+	if err != nil || len(groups) != 1 || groups[0]["lastUpdatedAt"] != "2026-01-03T00:00:00Z" {
+		t.Fatalf("garden group fields = %#v, err=%v", groups, err)
 	}
 }
 

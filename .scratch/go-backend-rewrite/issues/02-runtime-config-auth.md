@@ -11,10 +11,10 @@
 - [x] 代理开关、代理地址、代理认证和按资源源站选择代理的配置可被 Go 使用
 - [x] Go 通过 Store 访问 JSON 配置，不让业务模块直接依赖 JSON 文件读写
 - [x] 迁移模式能明确指定 RSS、重命名和维护任务的唯一所有者
-- [ ] Go 与 Java 同时运行时不会同时执行同一组定时任务，也不会同时写入同一份运行状态
-- [ ] 配置校验、默认值、URL 规范化、路径规范化和时区行为可通过 HTTP 测试验证
+- [x] Go 与 Java 同时运行时不会同时执行同一组定时任务，也不会同时写入同一份运行状态
+- [x] 配置校验、默认值、URL 规范化、路径规范化和时区行为可通过 HTTP 测试验证
 - [x] 认证失败、配置校验失败和外部服务失败都返回稳定的 UI 可消费错误结构
 
 ## Acceptance evidence
 
-Go HTTP contract tests cover ping/config/login, redaction, invalid config, external-source failure and Bangumi episode updates; auth tests cover bearer sessions, API keys, IP rules, token revocation and the 31st failed login; proxy tests cover host matching, credentials and timeout; ownership tests cover Java/Go lock contention, stale-lock recovery and replacement-safe release. The state-writer isolation and timezone-specific HTTP checks remain open.
+Go HTTP contract tests cover ping/config/login, redaction, invalid config, external-source failure and Bangumi episode updates; auth tests cover bearer sessions, API keys, IP rules, token revocation and the 31st failed login; proxy tests cover host matching, credentials and timeout; ownership tests cover Java/Go lock contention, stale-lock recovery, replacement-safe release and state-writer fallback. Configuration tests cover defaults, HTTP URL validation, path normalization and local-time release-date grouping. Java Maven tests and the Vue build also pass.

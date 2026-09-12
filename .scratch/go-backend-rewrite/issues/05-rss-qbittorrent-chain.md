@@ -11,11 +11,11 @@
 - [x] 包含/排除、字幕组、集数偏移、优先级、重复检测、延迟下载、主资源/备用资源和洗版规则可生效
 - [x] qBittorrent 登录测试、种子/磁力提交、标签、保存路径和下载参数可用
 - [x] 下载任务状态能被轮询并映射为等待、下载中、暂停、完成、失败等可观察状态
-- [ ] 同一个资源在重复刷新、重启或网络重试后不会被重复提交
+- [x] 同一个资源在重复刷新、重启或网络重试后不会被重复提交
 - [x] RSS 失败、qBittorrent 失败和单个订阅失败不会阻断其他订阅处理，并能在日志中诊断
 - [x] fake resource source 与 fake qBittorrent 能完成 RSS → 资源 → 下载任务 → 完成事件的端到端测试
 - [ ] 同一场景下 Go 与 Java 的稳定用户可见结果可以进行差异对比
 
 ## Acceptance evidence
 
-HTTP integration tests cover single/all refresh, fake RSS → qBittorrent submission, completion polling, progress and duplicate prevention. RSS tests cover matching rules, standby/wash behavior, custom episode parsing, failures and restart-safe history; qBittorrent tests cover auth, submission fields and status mapping. Differential evidence currently covers only `/api/ping`; business-scenario differential testing and qBittorrent-query-failure idempotency remain open.
+HTTP integration tests cover single/all refresh, fake RSS → qBittorrent submission, completion polling, progress and duplicate prevention. RSS tests cover matching rules, standby/wash behavior, custom episode parsing, failures, restart-safe history, qBittorrent inventory fail-closed behavior and reconciliation when add succeeds remotely but its response fails. qBittorrent tests cover auth, submission fields and status mapping. Differential smoke currently compares the stable `/api/ping` envelope only; business-scenario differential testing remains open.

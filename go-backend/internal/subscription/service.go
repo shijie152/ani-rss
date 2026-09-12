@@ -448,7 +448,14 @@ func normalizeAni(item model.Ani) model.Ani {
 
 func parseReleaseDate(item model.Ani) time.Time {
 	for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02 15:04:05"} {
-		if date, err := time.Parse(layout, item.ReleaseDate); err == nil {
+		var date time.Time
+		var err error
+		if layout == time.RFC3339 {
+			date, err = time.Parse(layout, item.ReleaseDate)
+		} else {
+			date, err = time.ParseInLocation(layout, item.ReleaseDate, time.Local)
+		}
+		if err == nil {
 			return date
 		}
 	}

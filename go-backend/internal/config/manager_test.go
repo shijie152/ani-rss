@@ -58,3 +58,17 @@ func TestManagerRejectsIncompleteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestManagerRejectsMalformedHTTPURL(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Update(model.Config{"mikanHost": "http://"}); err == nil || !strings.Contains(err.Error(), "地址异常") {
+		t.Fatalf("invalid URL error = %v", err)
+	}
+}

@@ -6,15 +6,15 @@
 
 **Status:** ready-for-agent
 
-- [ ] Mikan 搜索、季度列表、番剧详情和字幕组/RSS 链接接口可用
+- [x] Mikan 搜索、季度列表、番剧详情和字幕组/RSS 链接接口可用
 - [x] AniBT 搜索、季度列表和字幕组/RSS 链接接口可用
-- [ ] AnimeGarden 列表、详情和字幕组/RSS 链接接口可用
+- [x] AnimeGarden 列表、详情和字幕组/RSS 链接接口可用
 - [x] Bangumi 标题查询、subject 信息获取和 subject 转订阅接口可用
-- [ ] 结果中的已订阅标记、标题、封面、季信息、资源信息和字幕组信息符合 UI 预期
-- [ ] HTML/RSS fixture 能覆盖正常页面、空结果、字段缺失、格式变化、重定向和非成功状态
+- [x] 结果中的已订阅标记、标题、封面、季信息、资源信息和字幕组信息符合 UI 预期
+- [x] HTML/RSS fixture 能覆盖正常页面、空结果、字段缺失、格式变化、重定向和非成功状态
 - [x] 资源源站客户端遵守超时、重试、代理和 User-Agent 配置
 - [x] 用户可以从源站结果直接创建订阅，并在刷新页面后看到该订阅
 
 ## Acceptance evidence
 
-Fixture tests cover Mikan HTML search/group parsing, AniBT seasonal/group transformation, AnimeGarden list/group transformation, Bangumi lookup/conversion, redirects, non-2xx responses, missing fields, retries, User-Agent, proxy and timeout behavior. Mikan seasonal/detail completeness, AnimeGarden detail-specific fields, and the full latest UI result-field matrix remain open.
+Fixture tests cover Mikan HTML search/season/detail/group parsing, AniBT seasonal/group transformation, AnimeGarden list/group transformation and latest-group fields, Bangumi lookup/conversion, redirects, non-2xx responses, missing fields, retries, User-Agent, proxy and timeout behavior. The source result keys used by the unchanged Vue views (season selection, subscribed marker, cover/title, update day, group regex, RSS and formatted sizes) are asserted.

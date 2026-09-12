@@ -101,6 +101,10 @@ public class AniUtil {
      * 将订阅配置保存到磁盘
      */
     public static synchronized void sync() {
+        if (!ani.rss.service.RuntimeOwnership.javaOwnsState()) {
+            log.warn("应用状态由其他运行时负责，跳过 Java 订阅写入");
+            return;
+        }
         File configFile = getAniFile();
         log.debug("保存订阅 {}", configFile);
         try {

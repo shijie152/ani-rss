@@ -50,6 +50,13 @@ public class TaskService {
             log.warn("任务已经在运行中");
             return;
         }
+        // RSS, rename and maintenance all update the shared JSON state. The
+        // state writer must be exclusive before any scheduled task starts.
+        if (!runtimeOwnership.acquire("state")) {
+            LOOP.set(false);
+            log.warn("应用状态已由其他运行时写入，Java 定时任务不会启动");
+            return;
+        }
         LOOP.set(true);
 
         List<TaskDefinition> definitions = List.of(
@@ -70,6 +77,7 @@ public class TaskService {
         }
         if (THREADS.isEmpty()) {
             LOOP.set(false);
+            runtimeOwnership.release("state");
             log.warn("RSS、重命名和维护任务均已被其他进程占用，Java 任务不会启动");
             return;
         }

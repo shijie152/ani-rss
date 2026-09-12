@@ -211,6 +211,9 @@ func (c *Client) AniBTGroup(bgmID string) ([]map[string]any, error) {
 		slug := stringValue(group["slug"])
 		group["bgmId"] = bgmID
 		group["rss"] = fmt.Sprintf("%s/rss/anime.xml?bgmId=%s&groupSlug=%s", c.aniBTHost, url.QueryEscape(bgmID), url.QueryEscape(slug))
+		if _, exists := group["items"]; !exists {
+			group["items"] = []any{}
+		}
 		if items, ok := group["items"].([]any); ok {
 			for _, raw := range items {
 				if item, ok := raw.(map[string]any); ok {
@@ -218,6 +221,8 @@ func (c *Client) AniBTGroup(bgmID string) ([]map[string]any, error) {
 				}
 			}
 			group["groupRegex"] = buildGroupRegex(groupTitles(items))
+		} else {
+			group["groupRegex"] = map[string]any{"regexList": []any{}, "tags": []string{}}
 		}
 	}
 	return envelope.Data.Groups, nil
@@ -285,7 +290,10 @@ func (c *Client) AnimeGardenGroup(bgmID string) ([]map[string]any, error) {
 		group := groups[id]
 		if group == nil {
 			group = map[string]any{"id": id, "name": name, "bgmId": bgmID, "rss": fmt.Sprintf("%s/feed.xml?subject=%s&fansub=%s", c.gardenHost, url.QueryEscape(bgmID), url.QueryEscape(name)), "items": []any{}}
+			group["lastUpdatedAt"] = latestItemTime(item, "createdAt", "fetchedAt")
 			groups[id] = group
+		} else if newer(latestItemTime(item, "createdAt", "fetchedAt"), group["lastUpdatedAt"]) {
+			group["lastUpdatedAt"] = latestItemTime(item, "createdAt", "fetchedAt")
 		}
 		items := group["items"].([]any)
 		item["formatSize"] = formatSize(number64(item["size"]))
@@ -439,6 +447,9 @@ func (c *Client) mikanDetail(target string, body []byte) (map[string]any, error)
 		label, anchor := text(nameNode), attr(nameNode, "data-anchor")
 		section := firstID(document, strings.TrimPrefix(anchor, "#"))
 		group := map[string]any{"label": label, "subgroupId": strings.TrimPrefix(anchor, "#"), "rss": "", "items": []any{}}
+		if date := firstClass(left, "date"); date != nil {
+			group["updateDay"] = text(date)
+		}
 		if section != nil {
 			if rss := firstClass(section, "mikan-rss"); rss != nil {
 				group["rss"] = absolute(target, attr(rss, "href"))
@@ -537,6 +548,48 @@ func (c *Client) hasSubject(id string) bool {
 		}
 	}
 	return false
+}
+
+func itemTime(item map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := item[key]; ok && strings.TrimSpace(stringValue(value)) != "" {
+			return value
+		}
+	}
+	return nil
+}
+
+func latestItemTime(item map[string]any, keys ...string) any {
+	var latest any
+	for _, key := range keys {
+		candidate := itemTime(item, key)
+		if newer(candidate, latest) {
+			latest = candidate
+		}
+	}
+	if latest != nil {
+		return latest
+	}
+	return nil
+}
+
+func newer(candidate, current any) bool {
+	left, leftOK := parseItemTime(candidate)
+	right, rightOK := parseItemTime(current)
+	return leftOK && (!rightOK || left.After(right))
+}
+
+func parseItemTime(value any) (time.Time, bool) {
+	raw := strings.TrimSpace(stringValue(value))
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, time.RFC1123Z, "2006-01-02 15:04:05", "2006-01-02"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func numberFloat(value any) float64 {

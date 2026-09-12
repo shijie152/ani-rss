@@ -295,6 +295,10 @@ public class ConfigUtil {
      * 将设置保存到磁盘
      */
     public static synchronized void sync() {
+        if (!ani.rss.service.RuntimeOwnership.javaOwnsState()) {
+            log.warn("应用状态由其他运行时负责，跳过 Java 配置写入");
+            return;
+        }
         File configFile = getConfigFile();
         log.debug("保存配置 {}", configFile);
         try {

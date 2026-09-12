@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,10 @@ func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 		}
 		if r.URL.Path == "/api/v2/app/version" {
 			_, _ = w.Write([]byte("v4"))
+			return
+		}
+		if r.URL.Path == "/api/v2/torrents/info" {
+			_, _ = w.Write([]byte(`[]`))
 			return
 		}
 		http.NotFound(w, r)
@@ -95,6 +100,96 @@ func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 	}
 	if got := servicesAgain.Items()[0].CurrentEpisodeNumber; got != 1 {
 		t.Fatalf("current episode after duplicate refresh = %d", got)
+	}
+}
+
+func TestCoordinatorFailsClosedWhenTaskInventoryFails(t *testing.T) {
+	var adds atomic.Int32
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = w.Write([]byte("v4"))
+		case "/api/v2/torrents/info":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "/api/v2/torrents/add":
+			adds.Add(1)
+			_, _ = w.Write([]byte("Ok"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<rss><channel><item><title>[Group] Demo E01</title><enclosure url="magnet:?xt=urn:btih:FAIL-CLOSED" length="100"/></item></channel></rss>`))
+	}))
+	defer feed.Close()
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
+	coordinator := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err == nil {
+		t.Fatal("inventory failure was ignored")
+	}
+	if adds.Load() != 0 {
+		t.Fatalf("submitted despite inventory failure: %d", adds.Load())
+	}
+}
+
+func TestCoordinatorReconcilesTaskCreatedBeforeAddResponseFailed(t *testing.T) {
+	var adds atomic.Int32
+	var taskVisible atomic.Bool
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = w.Write([]byte("v4"))
+		case "/api/v2/torrents/info":
+			if taskVisible.Load() {
+				_, _ = w.Write([]byte(`[{"hash":"recovered","name":"Demo E01","state":"downloading","progress":0.1,"size":100,"amount_left":90,"category":"ani-rss","tags":"ani-rss"}]`))
+			} else {
+				_, _ = w.Write([]byte(`[]`))
+			}
+		case "/api/v2/torrents/add":
+			adds.Add(1)
+			taskVisible.Store(true)
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte("request timed out after task creation"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<rss><channel><item><title>[Group] Demo E01</title><enclosure url="magnet:?xt=urn:btih:RECOVERED" length="100"/></item></channel></rss>`))
+	}))
+	defer feed.Close()
+
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
+	coordinator := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err != nil {
+		t.Fatalf("refresh with recoverable add response failure = %v", err)
+	}
+	if adds.Load() != 1 {
+		t.Fatalf("add count = %d, want 1", adds.Load())
+	}
+	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err != nil {
+		t.Fatalf("retry after recovered task = %v", err)
+	}
+	if adds.Load() != 1 {
+		t.Fatalf("duplicate add after retry = %d", adds.Load())
 	}
 }
 

@@ -20,7 +20,7 @@ func main() {
 	javaURL := flag.String("java-url", envOrDefault("JAVA_URL", "http://127.0.0.1:7790"), "Java transition backend URL")
 	uiDirectory := flag.String("ui-dir", envOrDefault("UI_DIR", "ani-rss-ui/dist"), "directory containing the built Vue UI")
 	configDirectory := flag.String("config-dir", envOrDefault("CONFIG", "config"), "directory containing ANI-RSS JSON data")
-	goDomains := flag.String("go-domains", envOrDefault("GO_DOMAINS", "runtime,subscriptions,sources,rss,media"), "comma-separated business domains owned by Go")
+	goDomains := flag.String("go-domains", envOrDefault("GO_DOMAINS", "state,runtime,subscriptions,sources,rss,media"), "comma-separated business domains owned by Go")
 	flag.Parse()
 
 	domains := splitDomains(*goDomains)

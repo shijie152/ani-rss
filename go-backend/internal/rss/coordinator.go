@@ -282,11 +282,15 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 	// History is the durable fast path. The downloader is also consulted so a
 	// manually restored qBittorrent task cannot be submitted a second time.
 	tasks, taskErr := c.QB.Torrents(ctx)
-	if taskErr == nil {
-		for _, task := range tasks {
-			if task.Hash != "" {
-				existing[strings.ToLower(task.Hash)] = true
-			}
+	if taskErr != nil {
+		// Without a successful inventory we cannot distinguish a new resource
+		// from a task restored manually or created by a previous retry. Failing
+		// closed is required for idempotent download submission.
+		return nil, fmt.Errorf("查询 qBittorrent 任务失败: %w", taskErr)
+	}
+	for _, task := range tasks {
+		if task.Hash != "" {
+			existing[strings.ToLower(task.Hash)] = true
 		}
 	}
 	pathData, err := c.Subscriptions.DownloadPath(ani)
@@ -329,6 +333,15 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		// immediately; rename is performed after completion, so pausing here
 		// would leave a newly submitted task idle forever.
 		if err := c.QB.Add(ctx, resource, savePath, tags, false); err != nil {
+			// qBittorrent can create the task and still lose the HTTP response
+			// (for example on a proxy timeout). Reconcile once before reporting
+			// failure so a retry does not submit the same resource twice.
+			if recovered, inventoryErr := c.QB.Torrents(ctx); inventoryErr == nil && containsResourceTask(recovered, resource) {
+				history = append(history, resource)
+				newResources = append(newResources, resource)
+				existing[key] = true
+				continue
+			}
 			failures = append(failures, resource.Title+": "+err.Error())
 			continue
 		}
@@ -345,6 +358,18 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		return newResources, errors.New(strings.Join(failures, "; "))
 	}
 	return newResources, nil
+}
+
+func containsResourceTask(tasks []model.Torrent, resource model.Resource) bool {
+	for _, task := range tasks {
+		if resource.InfoHash != "" && strings.EqualFold(task.Hash, resource.InfoHash) {
+			return true
+		}
+		if strings.EqualFold(task.Name, resource.Title) {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteStandbyTasks performs the explicit wash step used by the Java

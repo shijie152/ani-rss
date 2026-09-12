@@ -17,6 +17,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/backend"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/ownership"
 )
 
 func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
@@ -101,6 +102,52 @@ func TestSubscriptionRoutesPersistThroughRestart(t *testing.T) {
 	response = callJSON(t, server.URL+"/api/listAni", token, map[string]any{})
 	if response["data"].(map[string]any)["total"] != float64(1) {
 		t.Fatalf("restart lost subscription: %#v", response)
+	}
+}
+
+func TestSubscriptionHTTPRoundTripsRulesAndRejectsEmptyImport(t *testing.T) {
+	dir := t.TempDir()
+	app, err := backend.New(backend.Options{ConfigDir: dir, OwnershipDomains: []string{"runtime", "subscriptions"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions"}}))
+	t.Cleanup(server.Close)
+	t.Cleanup(app.Close)
+	token := login(t, server.URL)
+	item := model.Ani{
+		ID: "rules", Title: "Rules", URL: "https://example.test/rules", Season: 2, Enable: true,
+		StandbyRSSList: []model.StandbyRSS{{Label: "Backup", URL: "https://example.test/backup", Offset: 1}},
+		Subgroup:       "Group", Offset: 2, Match: []string{"1080p"}, Exclude: []string{"720p"},
+		GlobalExclude: true, CustomEpisode: true, CustomEpisodeStr: `(.*?)(E\\d+)`, CustomEpisodeGroupIndex: 2,
+		DownloadNew: true, NotDownload: []float64{3}, CustomPriorityKeywordsEnable: true, CustomPriorityKeywords: []string{"HEVC"},
+		CustomDownloadPath: true, CustomDownloadPathTemplate: filepath.Join(dir, "library", "${title}"),
+		CustomRenameTemplateEnable: true, CustomRenameTemplate: "${title} ${episode}",
+		CustomCompleted: true, CustomCompletedPathTemplate: filepath.Join(dir, "completed", "${title}"),
+		CustomTagsEnable: true, CustomTags: []string{"tag"},
+	}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add rules = %#v", response)
+	}
+	listed := callJSON(t, server.URL+"/api/listAni", token, nil)
+	weeks := listed["data"].(map[string]any)["weekList"].([]any)
+	var raw map[string]any
+	for _, week := range weeks {
+		for _, candidate := range week.(map[string]any)["items"].([]any) {
+			value := candidate.(map[string]any)
+			if value["id"] == item.ID {
+				raw = value
+			}
+		}
+	}
+	if raw == nil || raw["offset"] != float64(2) || raw["subgroup"] != "Group" || raw["downloadNew"] != true {
+		t.Fatalf("rules not visible in list: %#v", raw)
+	}
+	if got := raw["standbyRssList"].([]any)[0].(map[string]any); got["label"] != "Backup" || got["offset"] != float64(1) {
+		t.Fatalf("standby rule = %#v", got)
+	}
+	if response := callJSON(t, server.URL+"/api/importAni", token, map[string]any{"aniList": []model.Ani{}}); response["code"] != float64(http.StatusInternalServerError) || response["message"] == "" {
+		t.Fatalf("empty import = %#v", response)
 	}
 }
 
@@ -340,6 +387,100 @@ func TestHTTPRefreshDrivesRSSToQBittorrentCompletionChain(t *testing.T) {
 	}
 }
 
+func TestHTTPMediaRoutesUseMetadataAndFilesystemContract(t *testing.T) {
+	bgmImageURL := ""
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/3/tv/42":
+			_, _ = io.WriteString(w, `{"id":42,"name":"Demo Show","original_name":"Demo JP","overview":"overview","first_air_date":"2024-01-01","number_of_episodes":1,"vote_average":8.5,"poster_path":"/poster.jpg"}`)
+		case "/3/tv/42/season/1":
+			_, _ = io.WriteString(w, `{"episodes":[{"episode_number":1,"name":"Pilot","overview":"pilot","air_date":"2024-01-01","still_path":"/still.jpg"}]}`)
+		case "/v0/subjects/42":
+			_, _ = io.WriteString(w, `{"id":42,"name":"Demo JP","name_cn":"Demo CN","eps":12,"images":{"large":"`+bgmImageURL+`"}}`)
+		default:
+			if strings.HasPrefix(r.URL.Path, "/t/p/original/") || r.URL.Path == "/cover.png" || r.URL.Path == "/bgm.jpg" {
+				w.Header().Set("Content-Type", "image/jpeg")
+				_, _ = io.WriteString(w, "image")
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer metadataServer.Close()
+
+	bgmImageURL = metadataServer.URL + "/bgm.jpg"
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<rss><channel><item><title>[Group] Demo E01</title><enclosure url="magnet:?xt=urn:btih:PREVIEW" length="100"/></item></channel></rss>`)
+	}))
+	defer feed.Close()
+
+	root := t.TempDir()
+	mediaRoot := filepath.Join(root, "library", "Demo")
+	if err := os.MkdirAll(mediaRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	video := filepath.Join(mediaRoot, "[Group] Demo - 01 [1080p].mkv")
+	if err := os.WriteFile(video, []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// PlaybackList intentionally excludes tiny files; a sparse file exercises
+	// that public contract without making the test expensive.
+	if err := os.Truncate(video, 20*1024*1024); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := backend.New(backend.Options{ConfigDir: root, OwnershipDomains: []string{"runtime", "subscriptions", "sources", "rss", "media"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources", "rss", "media"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	config := model.Config{
+		"tmdbApi":              metadataServer.URL,
+		"tmdbImage":            metadataServer.URL,
+		"tmdbApiKey":           "test",
+		"bgmApi":               metadataServer.URL,
+		"downloadPathTemplate": filepath.Join(root, "library", "${title}"),
+	}
+	if response := callJSON(t, server.URL+"/api/setConfig", token, config); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set media config = %#v", response)
+	}
+	item := model.Ani{ID: "media", Title: "Demo", URL: feed.URL, BGMURL: "https://bgm.tv/subject/42", Subgroup: "Group", Season: 1, Enable: true, TMDB: map[string]any{"id": "42"}, CustomDownloadPath: true, CustomDownloadPathTemplate: mediaRoot}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add media subscription = %#v", response)
+	}
+
+	if response := callJSON(t, server.URL+"/api/scrape?force=true", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("scrape = %#v", response)
+	}
+	if _, err := os.Stat(filepath.Join(mediaRoot, "[Group] Demo S01E01.mkv")); err != nil {
+		entries, _ := os.ReadDir(mediaRoot)
+		t.Fatalf("scrape did not rename media: %v entries=%v", err, entries)
+	}
+	if response := callJSON(t, server.URL+"/api/batchScrape?force=false", token, []string{item.ID}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("batch scrape = %#v", response)
+	}
+	playlist := callJSON(t, server.URL+"/api/playList", token, item)
+	if playlist["code"] != float64(http.StatusOK) || len(playlist["data"].([]any)) != 1 {
+		t.Fatalf("playlist = %#v", playlist)
+	}
+	coverItem := item
+	coverItem.Image = metadataServer.URL + "/cover.png"
+	if response := callJSON(t, server.URL+"/api/refreshCover", token, coverItem); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("refresh cover = %#v", response)
+	}
+	if response := callJSON(t, server.URL+"/api/updateTotalEpisodeNumber?force=true", token, []string{item.ID}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("update total episodes = %#v", response)
+	}
+	preview := callJSON(t, server.URL+"/api/previewAni", token, item)
+	if preview["code"] != float64(http.StatusOK) || len(preview["data"].(map[string]any)["items"].([]any)) != 1 {
+		t.Fatalf("preview = %#v", preview)
+	}
+}
+
 func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
 	var added atomic.Int32
 	refreshed := make(chan struct{}, 1)
@@ -410,6 +551,43 @@ func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
 	if added.Load() != 1 {
 		t.Fatalf("scheduled add count = %d", added.Load())
 	}
+}
+
+func TestStateOwnershipFallsBackToJavaForWriteRoutes(t *testing.T) {
+	dir := t.TempDir()
+	javaOwner, err := ownership.NewManager(filepath.Join(dir, "locks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := javaOwner.Acquire("state", "java"); err != nil {
+		t.Fatal(err)
+	}
+	defer javaOwner.Close()
+
+	app, err := backend.New(backend.Options{ConfigDir: dir, OwnershipDomains: []string{"state", "runtime", "subscriptions", "sources", "rss", "media"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	owned := app.OwnedDomains()
+	for _, domain := range []string{"runtime", "subscriptions", "rss", "media"} {
+		for _, actual := range owned {
+			if actual == domain {
+				t.Fatalf("state-conflicting domain %q remained Go-owned: %v", domain, owned)
+			}
+		}
+	}
+	if len(owned) != 1 || owned[0] != "sources" {
+		t.Fatalf("read-only fallback domains = %v", owned)
+	}
+	javaFallback, err := ownership.NewManager(filepath.Join(dir, "locks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := javaFallback.Acquire("rss", "java"); err != nil {
+		t.Fatalf("Go retained RSS lock after state conflict: %v", err)
+	}
+	javaFallback.Close()
 }
 
 func login(t *testing.T, baseURL string) string {

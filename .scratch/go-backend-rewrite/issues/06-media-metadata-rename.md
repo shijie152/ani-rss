@@ -7,7 +7,7 @@
 **Status:** ready-for-agent
 
 - [x] TMDB/Bangumi 元数据查询、标题/评分/季集信息、封面和刮削接口可用
-- [ ] 手动刮削、批量刮削、刷新封面和更新总集数接口可用
+- [x] 手动刮削、批量刮削、刷新封面和更新总集数接口可用
 - [x] 视频、字幕和图片文件按当前支持的格式被识别，其他文件不被误处理
 - [x] 集数、季、字幕组、质量、语言和标题能从资源/文件名中稳定提取
 - [ ] 全局和订阅级命名模板、路径模板、自定义集数规则及文件名长度限制可用
@@ -18,4 +18,4 @@
 
 ## Acceptance evidence
 
-Media tests cover TMDB season metadata, Bangumi fallback, rename, subtitle matching, NFO/cover/still generation, supported formats, duplicate protection, completed-media movement, embedded subtitles, cover refresh and transient asset recovery. Complete HTTP scrape/batch/preview acceptance, missing-metadata and invalid-path cases, cross-platform path behavior, and browser/UI smoke verification remain open.
+Media tests cover TMDB season metadata, Bangumi fallback, rename, subtitle matching, NFO/cover/still generation, supported formats, duplicate protection, completed-media movement, embedded subtitles, cover refresh and transient asset recovery. Backend HTTP tests cover scrape, batch scrape, preview, playlist, cover refresh and total-episode update against temporary metadata/media servers. Naming/path matrix, invalid-path/missing-metadata HTTP cases, cross-platform path behavior and browser/UI smoke remain open; the Vue production build passes without UI source changes.

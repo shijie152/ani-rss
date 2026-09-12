@@ -109,7 +109,11 @@ func (m *Manager) Update(input model.Config) error {
 func Normalize(cfg model.Config) error {
 	for _, key := range []string{"mikanHost", "tmdbApi", "tmdbImage", "bgmApi", "downloadToolHost"} {
 		if value, ok := cfg[key].(string); ok {
-			cfg[key] = normalizeURL(value)
+			normalized, err := normalizeURL(value)
+			if err != nil {
+				return fmt.Errorf("%s 地址异常: %w", key, err)
+			}
+			cfg[key] = normalized
 		}
 	}
 	for _, key := range []string{"downloadPathTemplate", "ovaDownloadPathTemplate", "completedPathTemplate"} {
@@ -260,15 +264,19 @@ func intValue(value any) int {
 	}
 }
 
-func normalizeURL(value string) string {
+func normalizeURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return value
+		return value, nil
 	}
 	if !strings.HasPrefix(strings.ToLower(value), "http://") && !strings.HasPrefix(strings.ToLower(value), "https://") {
 		value = "http://" + value
 	}
-	return strings.TrimRight(value, "/")
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return "", errors.New("必须是有效的 HTTP/HTTPS 地址")
+	}
+	return strings.TrimRight(value, "/"), nil
 }
 
 func newID() string {
