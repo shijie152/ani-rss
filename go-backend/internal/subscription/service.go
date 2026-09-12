@@ -348,6 +348,29 @@ func (s *Service) Items() []model.Ani {
 	return append([]model.Ani(nil), s.items...)
 }
 
+// ValidateItems checks imported/persisted subscriptions before they enter the
+// live service. Keeping this at the domain boundary prevents malformed JSON
+// from becoming a silently unusable subscription after restart.
+func ValidateItems(items []model.Ani) error {
+	ids := make(map[string]struct{}, len(items))
+	names := make(map[string]struct{}, len(items))
+	for index, item := range items {
+		if err := validate(item); err != nil {
+			return fmt.Errorf("订阅 %d: %w", index+1, err)
+		}
+		if _, exists := ids[item.ID]; exists {
+			return fmt.Errorf("订阅 %d: ID 重复 %q", index+1, item.ID)
+		}
+		ids[item.ID] = struct{}{}
+		name := strings.ToLower(strings.TrimSpace(item.Title)) + "\x00" + strconv.Itoa(item.Season)
+		if _, exists := names[name]; exists {
+			return fmt.Errorf("订阅 %d: 标题和季度重复", index+1)
+		}
+		names[name] = struct{}{}
+	}
+	return nil
+}
+
 func (s *Service) saveLocked() error { return s.store.SaveSubscriptions(s.items) }
 
 func validate(item model.Ani) error {

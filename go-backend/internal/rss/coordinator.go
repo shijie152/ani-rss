@@ -240,6 +240,19 @@ func (c *Coordinator) RefreshAll(ctx context.Context) (map[string][]model.Resour
 	return result, nil
 }
 
+// WaitForCompletion keeps the RSS coordinator as the boundary for the full
+// refresh-to-download lifecycle. Callers do not need to know which downloader
+// protocol supplies the status events.
+func (c *Coordinator) WaitForCompletion(ctx context.Context, hash string, interval time.Duration) (model.Torrent, error) {
+	if c.QB == nil {
+		return model.Torrent{}, errors.New("qBittorrent is not configured")
+	}
+	if err := c.QB.Login(ctx); err != nil {
+		return model.Torrent{}, err
+	}
+	return c.QB.WaitForCompletion(ctx, hash, interval)
+}
+
 func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []model.Resource) ([]model.Resource, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -269,8 +282,14 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		return nil, err
 	}
 	savePath := pathData["downloadPath"].(string)
-	newResources := []model.Resource{}
 	var failures []string
+	if deleteErr := c.deleteStandbyTasks(ctx, savePath, resources, tasks); deleteErr != nil {
+		// Keep submitting the primary resources even when cleanup of an old
+		// standby task fails. This matches Java's best-effort wash behavior and
+		// keeps a stale downloader task from blocking the new primary task.
+		failures = append(failures, deleteErr.Error())
+	}
+	newResources := []model.Resource{}
 	for _, resource := range resources {
 		key := resourceKey(resource)
 		if existing[key] {
@@ -314,6 +333,47 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		return newResources, errors.New(strings.Join(failures, "; "))
 	}
 	return newResources, nil
+}
+
+// deleteStandbyTasks performs the explicit wash step used by the Java
+// downloader: when a primary resource for an episode arrives, remove an old
+// standby task for the same subscription. It is deliberately opt-in because
+// deleting downloader tasks/files is user-visible and irreversible.
+func (c *Coordinator) deleteStandbyTasks(ctx context.Context, savePath string, resources []model.Resource, tasks []model.Torrent) error {
+	if !appconfig.Bool(c.Config.Snapshot(), "delete") || !appconfig.Bool(c.Config.Snapshot(), "standbyRss") || appconfig.Bool(c.Config.Snapshot(), "coexist") {
+		return nil
+	}
+	primaryEpisodes := map[float64]bool{}
+	for _, resource := range resources {
+		if resource.Master && resource.Episode > 0 {
+			primaryEpisodes[resource.Episode] = true
+		}
+	}
+	if len(primaryEpisodes) == 0 {
+		return nil
+	}
+	var failures []string
+	for _, task := range tasks {
+		if task.Hash == "" || task.SavePath != savePath || !hasTorrentTag(task.TagList, "备用RSS") || !primaryEpisodes[Episode(task.Name)] {
+			continue
+		}
+		if err := c.QB.Delete(ctx, task.Hash, true); err != nil {
+			failures = append(failures, task.Hash+": "+err.Error())
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New("备用 RSS 清理失败: " + strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func hasTorrentTag(tags []string, target string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(strings.TrimSpace(tag), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func dedupeFeeds(items []model.Resource, ani model.Ani, coexist bool) []model.Resource {

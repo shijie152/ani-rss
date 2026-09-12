@@ -195,6 +195,43 @@ func (q *QBittorrent) Torrents(ctx context.Context) ([]model.Torrent, error) {
 	return result, nil
 }
 
+// WaitForCompletion observes one qBittorrent task until it reaches a
+// terminal upload/completed state. It is context-aware so the scheduler can
+// stop waiting during shutdown and treats downloader error states as a
+// failed completion event rather than spinning forever.
+func (q *QBittorrent) WaitForCompletion(ctx context.Context, hash string, interval time.Duration) (model.Torrent, error) {
+	if strings.TrimSpace(hash) == "" {
+		return model.Torrent{}, errors.New("种子 hash 不能为空")
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		tasks, err := q.Torrents(ctx)
+		if err != nil {
+			return model.Torrent{}, err
+		}
+		for _, task := range tasks {
+			if !strings.EqualFold(task.Hash, hash) {
+				continue
+			}
+			switch task.State {
+			case "error", "missingFiles":
+				return task, fmt.Errorf("种子 %s 完成失败: %s", hash, task.State)
+			case "queuedUP", "uploading", "stalledUP", "stoppedUP":
+				return task, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return model.Torrent{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func containsTag(tags []string, target string) bool {
 	for _, tag := range tags {
 		if strings.EqualFold(strings.TrimSpace(tag), target) {

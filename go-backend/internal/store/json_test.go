@@ -50,6 +50,20 @@ func TestJSONStoreRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestJSONStoreAcceptsAnEmptySubscriptionArray(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSubscriptions([]model.Ani{}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.LoadSubscriptions()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("empty subscriptions = %#v, err=%v", items, err)
+	}
+}
+
 func TestJSONStoreConcurrentWritesRemainValid(t *testing.T) {
 	s, err := store.NewJSONStore(t.TempDir())
 	if err != nil {

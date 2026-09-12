@@ -2,9 +2,12 @@ package downloader_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
@@ -115,5 +118,41 @@ func TestQBittorrentAddCarriesJavaDownloadParameters(t *testing.T) {
 	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test", ContentLayout: "Subfolder", UseDownloadPath: true, UpLimit: 1024, DlLimit: 2048, RatioLimit: 1, SeedingTimeLimit: 3600, InactiveSeedingTimeLimit: 7200, Rename: "Demo S01E01"}
 	if err := adapter.Add(context.Background(), model.Resource{Title: "Demo", Magnet: "magnet:?xt=urn:btih:abc"}, "/media", []string{"ani-rss", "Group"}, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestQBittorrentWaitsForCompletionAndReportsFailure(t *testing.T) {
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/torrents/info" {
+			http.NotFound(w, r)
+			return
+		}
+		state := `downloading`
+		progress := 0.5
+		if polls.Add(1) > 1 {
+			state, progress = "stoppedUP", 1
+		}
+		_, _ = w.Write([]byte(`[{
+			"hash":"done","name":"Demo","state":"` + state + `","progress":` + fmt.Sprintf("%.1f", progress) + `,"size":100,"amount_left":50,"category":"ani-rss","tags":"ani-rss"
+		}]`))
+	}))
+	defer server.Close()
+	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	task, err := adapter.WaitForCompletion(context.Background(), "done", time.Millisecond)
+	if err != nil || task.State != "stoppedUP" || polls.Load() < 2 {
+		t.Fatalf("task=%#v err=%v polls=%d", task, err, polls.Load())
+	}
+	failure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/torrents/info" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`[{"hash":"bad","name":"Demo","state":"error","progress":0,"size":100,"amount_left":100,"category":"ani-rss","tags":"ani-rss"}]`))
+	}))
+	defer failure.Close()
+	failedTask, err := (&downloader.QBittorrent{Host: failure.URL, APIKey: "qbt_test"}).WaitForCompletion(context.Background(), "bad", time.Millisecond)
+	if err == nil || failedTask.State != "error" {
+		t.Fatalf("failed task=%#v err=%v", failedTask, err)
 	}
 }

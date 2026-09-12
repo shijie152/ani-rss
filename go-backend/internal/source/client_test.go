@@ -109,6 +109,9 @@ func TestAniBTAnimeGardenAndBangumiClientsTransformResults(t *testing.T) {
 func TestSourceClientRetriesRedirectsAndReportsNonSuccess(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "ani-rss-go" {
+			t.Errorf("User-Agent = %q", got)
+		}
 		switch r.URL.Path {
 		case "/Home/Search":
 			attempts++

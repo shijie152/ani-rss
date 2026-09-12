@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
 )
@@ -68,5 +69,25 @@ func TestClientUsesConfiguredProxyForMatchingHost(t *testing.T) {
 	body, _ := io.ReadAll(response.Body)
 	if string(body) != "proxied" {
 		t.Fatalf("proxy response = %q", body)
+	}
+}
+
+func TestClientAppliesConfiguredTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(100 * time.Millisecond):
+			_, _ = io.WriteString(w, "late")
+		}
+	}))
+	defer server.Close()
+	client, err := httpclient.New(map[string]any{}, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL)
+	if err == nil {
+		response.Body.Close()
+		t.Fatal("request exceeded configured timeout")
 	}
 }

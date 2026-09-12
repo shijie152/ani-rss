@@ -189,6 +189,54 @@ func TestCoordinatorUsesStandbyRSSAndKeepsOtherSubscriptionsMoving(t *testing.T)
 	}
 }
 
+func TestCoordinatorWashesSameEpisodeStandbyTaskBeforePrimarySubmit(t *testing.T) {
+	var deletedHash string
+	var deletedFiles string
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = w.Write([]byte("v4"))
+		case "/api/v2/torrents/info":
+			_, _ = w.Write([]byte(`[{"hash":"standby-hash","name":"Demo S01E01","state":"downloading","progress":0.2,"size":100,"amount_left":80,"save_path":"` + "/tmp/" + `Demo","category":"ani-rss","tags":"ani-rss,备用RSS"},{"hash":"other-hash","name":"Other S01E01","state":"downloading","progress":0.2,"size":100,"amount_left":80,"save_path":"/tmp/Other","category":"ani-rss","tags":"ani-rss,备用RSS"}]`))
+		case "/api/v2/torrents/delete":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("delete form: %v", err)
+			}
+			deletedHash, deletedFiles = r.Form.Get("hashes"), r.Form.Get("deleteFiles")
+			_, _ = w.Write([]byte("Ok"))
+		case "/api/v2/torrents/add":
+			_, _ = w.Write([]byte("Ok"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<rss><channel><item><title>[Group] Demo E01 [1080p]</title><guid>primary-1</guid><enclosure url="magnet:?xt=urn:btih:PRIMARY1" length="100"/></item></channel></rss>`))
+	}))
+	defer feed.Close()
+
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Update(model.Config{"delete": true, "standbyRss": true, "downloadPathTemplate": "/tmp/Demo"}); err != nil {
+		t.Fatal(err)
+	}
+	services := subscription.NewService(s, config, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
+	coordinator := &rss.Coordinator{Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if deletedHash != "standby-hash" || deletedFiles != "true" {
+		t.Fatalf("standby delete = hash %q files %q", deletedHash, deletedFiles)
+	}
+}
+
 func TestCustomEpisodeRuleAndHalfEpisodeFiltering(t *testing.T) {
 	items := []model.Resource{{Title: "Demo [12]", Episode: 0}, {Title: "Demo [12.5]", Episode: 0}}
 	matched := rss.Match(items, model.Ani{CustomEpisode: true, CustomEpisodeStr: `([0-9]+)`, CustomEpisodeGroupIndex: 1}, rss.MatchOptions{SkipHalf: true, CustomEpisode: true, CustomEpisodeRE: `([0-9]+)`, CustomEpisodeIdx: 1})

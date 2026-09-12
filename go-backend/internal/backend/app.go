@@ -67,6 +67,9 @@ func New(options Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := subscription.ValidateItems(items); err != nil {
+		return nil, fmt.Errorf("订阅数据校验失败: %w", err)
+	}
 	locks, err := ownership.NewManager(filepath.Join(jsonStore.Directory(), "locks"))
 	if err != nil {
 		return nil, err

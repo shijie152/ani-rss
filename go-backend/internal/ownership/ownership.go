@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -41,25 +42,60 @@ func (m *Manager) Acquire(domain, owner string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	path := filepath.Join(m.dir, "runtime-"+safe(domain)+".lock")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("%w: %s", ErrAlreadyOwned, domain)
+	for attempt := 0; attempt < 2; attempt++ {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			info := lockInfo{Owner: owner, PID: os.Getpid(), AcquiredAt: time.Now().UTC()}
+			if err := json.NewEncoder(file).Encode(info); err != nil {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return err
+			}
+			if err := file.Close(); err != nil {
+				_ = os.Remove(path)
+				return err
+			}
+			m.owned[domain] = owner
+			return nil
 		}
-		return fmt.Errorf("acquire %s: %w", domain, err)
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("acquire %s: %w", domain, err)
+		}
+		if attempt == 0 && staleLock(path) {
+			if removeErr := os.Remove(path); removeErr == nil {
+				continue
+			}
+		}
+		return fmt.Errorf("%w: %s", ErrAlreadyOwned, domain)
 	}
-	info := lockInfo{Owner: owner, PID: os.Getpid(), AcquiredAt: time.Now().UTC()}
-	if err := json.NewEncoder(file).Encode(info); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return err
+	return fmt.Errorf("%w: %s", ErrAlreadyOwned, domain)
+}
+
+func staleLock(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return err
+	var info lockInfo
+	if json.Unmarshal(data, &info) != nil || info.PID <= 0 {
+		return false
 	}
-	m.owned[domain] = owner
-	return nil
+	return !processAlive(info.PID)
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 probes process existence on Unix. Errors other than an
+	// explicitly completed process are treated as alive, which is the safe
+	// choice when permissions or platform-specific probing prevent certainty.
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || !errors.Is(err, os.ErrProcessDone)
 }
 
 func (m *Manager) Release(domain string) error {

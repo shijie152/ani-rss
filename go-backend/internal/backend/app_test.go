@@ -6,7 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/backend"
@@ -135,6 +138,10 @@ func TestHTTPConfigAuthAndBangumiEpisodeUpdateContract(t *testing.T) {
 	if loginConfig["password"] != "" || public["jwtKey"] != "" {
 		t.Fatalf("secrets leaked in public config: %#v", public)
 	}
+	invalidConfig := callJSON(t, server.URL+"/api/setConfig", token2, model.Config{"proxy": true, "proxyHost": "", "proxyPort": 8080})
+	if invalidConfig["code"] != float64(http.StatusInternalServerError) || invalidConfig["message"] == "" {
+		t.Fatalf("invalid config contract = %#v", invalidConfig)
+	}
 	set := callJSON(t, server.URL+"/api/setConfig", token2, model.Config{"bgmApi": bgm.URL + "/", "rssTimeout": 2})
 	if set["code"] != float64(http.StatusOK) {
 		t.Fatalf("set config = %#v", set)
@@ -159,6 +166,163 @@ func TestHTTPConfigAuthAndBangumiEpisodeUpdateContract(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("Bangumi eps was not persisted: %#v", listed)
+	}
+	if response := callJSON(t, server.URL+"/api/setConfig", token2, model.Config{"mikanHost": "http://127.0.0.1:1", "rssTimeout": 1}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set failing source = %#v", response)
+	}
+	failedSource := callJSON(t, server.URL+"/api/mikan?text=demo", token2, nil)
+	if failedSource["code"] != float64(http.StatusInternalServerError) || failedSource["message"] == "" {
+		t.Fatalf("external failure contract = %#v", failedSource)
+	}
+}
+
+func TestHTTPSourceConversionCanCreateVisibleSubscription(t *testing.T) {
+	bgm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/subjects/42" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":42,"name":"Demo JP","name_cn":"Demo CN","eps":12,"season":1,"images":{"large":"https://img.test/demo.jpg"}}`)
+	}))
+	defer bgm.Close()
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"runtime", "subscriptions", "sources"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": bgm.URL}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set BGM config = %#v", response)
+	}
+	converted := callJSON(t, server.URL+"/api/rssToAni", token, map[string]any{"url": "https://example.test/feed.xml", "bgmUrl": "https://bgm.tv/subject/42", "subgroup": "Group"})
+	if converted["code"] != float64(http.StatusOK) {
+		t.Fatalf("rss conversion = %#v", converted)
+	}
+	item, ok := converted["data"].(map[string]any)
+	if !ok || item["title"] != "Demo CN" || item["totalEpisodeNumber"] != float64(12) {
+		t.Fatalf("converted item = %#v", converted["data"])
+	}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add converted subscription = %#v", response)
+	}
+	listed := callJSON(t, server.URL+"/api/listAni", token, nil)
+	if listed["data"].(map[string]any)["total"] != float64(1) {
+		t.Fatalf("converted subscription not visible = %#v", listed)
+	}
+}
+
+func TestBackendRejectsMalformedPersistedSubscriptionData(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ani.v2.json"), []byte(`[{"id":"missing-title","url":"https://example.test/rss"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.New(backend.Options{ConfigDir: dir}); err == nil || !strings.Contains(err.Error(), "订阅数据校验失败") {
+		t.Fatalf("malformed startup data error = %v", err)
+	}
+}
+
+func TestBackendRejectsDuplicatePersistedSubscriptions(t *testing.T) {
+	dir := t.TempDir()
+	data := `[{"id":"one","title":"Demo","url":"https://example.test/one","season":1},{"id":"two","title":"Demo","url":"https://example.test/two","season":1}]`
+	if err := os.WriteFile(filepath.Join(dir, "ani.v2.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.New(backend.Options{ConfigDir: dir}); err == nil || !strings.Contains(err.Error(), "标题和季度重复") {
+		t.Fatalf("duplicate startup data error = %v", err)
+	}
+}
+
+func TestDifferentialPingAgainstJavaWhenConfigured(t *testing.T) {
+	javaURL := strings.TrimRight(os.Getenv("ANI_RSS_JAVA_URL"), "/")
+	if javaURL == "" {
+		t.Skip("set ANI_RSS_JAVA_URL to run the Go/Java differential smoke test")
+	}
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes()}))
+	defer server.Close()
+	goResult := callJSON(t, server.URL+"/api/ping", "", nil)
+	javaResult := callJSON(t, javaURL+"/api/ping", "", nil)
+	for _, key := range []string{"code", "message"} {
+		if goResult[key] != javaResult[key] {
+			t.Fatalf("differential ping %s: Go=%#v Java=%#v", key, goResult[key], javaResult[key])
+		}
+	}
+}
+
+func TestHTTPRefreshDrivesRSSToQBittorrentCompletionChain(t *testing.T) {
+	var added atomic.Int32
+	var addedPath atomic.Value
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = io.WriteString(w, "v4")
+		case "/api/v2/torrents/info":
+			if added.Load() == 0 {
+				_, _ = io.WriteString(w, "[]")
+				return
+			}
+			path, _ := addedPath.Load().(string)
+			_, _ = io.WriteString(w, `[{"hash":"chain","name":"Demo S01E01","state":"stoppedUP","progress":1,"size":100,"amount_left":0,"save_path":"`+path+`","category":"ani-rss","tags":"ani-rss,Group"}]`)
+		case "/api/v2/torrents/add":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("add form: %v", err)
+			}
+			addedPath.Store(r.Form.Get("savepath"))
+			added.Add(1)
+			_, _ = io.WriteString(w, "Ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<rss><channel><item><title>[Group] Demo E01</title><guid>chain-guid</guid><description>summary</description><enclosure url="magnet:?xt=urn:btih:CHAIN" length="100"/></item></channel></rss>`)
+	}))
+	defer feed.Close()
+
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"runtime", "subscriptions", "rss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "rss"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	path := filepath.Join(t.TempDir(), "${title}")
+	config := model.Config{"downloadToolHost": qb.URL, "downloadToolPassword": "qbt_test", "downloadRetry": 1, "rssTimeout": 2, "downloadPathTemplate": path}
+	if response := callJSON(t, server.URL+"/api/setConfig", token, config); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set chain config = %#v", response)
+	}
+	item := model.Ani{ID: "chain", Title: "Demo", URL: feed.URL, Subgroup: "Group", Season: 1, Enable: true}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add chain subscription = %#v", response)
+	}
+	if response := callJSON(t, server.URL+"/api/refreshAni", token, map[string]any{"id": item.ID}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("refresh chain = %#v", response)
+	}
+	if added.Load() != 1 {
+		t.Fatalf("add count after refresh = %d", added.Load())
+	}
+	status := callJSON(t, server.URL+"/api/torrentsInfos", token, nil)
+	if status["code"] != float64(http.StatusOK) {
+		t.Fatalf("torrent status = %#v", status)
+	}
+	tasks := status["data"].([]any)
+	if len(tasks) != 1 || tasks[0].(map[string]any)["state"] != "stoppedUP" || tasks[0].(map[string]any)["progress"] != float64(100) {
+		t.Fatalf("completed task = %#v", status)
+	}
+	if response := callJSON(t, server.URL+"/api/refreshAll", token, nil); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("refresh all = %#v", response)
+	}
+	if added.Load() != 1 {
+		t.Fatalf("refreshAll duplicated task: %d", added.Load())
 	}
 }
 

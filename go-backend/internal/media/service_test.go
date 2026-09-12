@@ -166,6 +166,76 @@ func TestEmbeddedMatroskaTextSubtitlesAreReturnedAsVTT(t *testing.T) {
 	}
 }
 
+func TestScrapeRecoversAfterTransientAssetFailure(t *testing.T) {
+	posterAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/3/tv/42":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 42, "name": "Demo", "first_air_date": "2024-01-01",
+				"number_of_episodes": 1, "poster_path": "/poster.jpg",
+			})
+		case "/3/tv/42/season/1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"episodes": []any{}})
+		case "/t/p/original/poster.jpg":
+			posterAttempts++
+			if posterAttempts == 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("poster"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dataStore, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(dataStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Update(model.Config{"tmdbApi": server.URL, "tmdbImage": server.URL, "tmdbApiKey": "test"}); err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir()
+	if err := os.WriteFile(filepath.Join(path, "[Group] Demo 01.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ani := model.Ani{ID: "recovery", Title: "Demo", URL: "https://example.test/rss", Season: 1, Subgroup: "Group", TMDB: map[string]any{"id": "42"}}
+	service := media.New(config, metadata.New(config.Snapshot(), server.Client()), server.Client(), func(model.Ani) (string, error) { return path, nil })
+	service.ConfigDir = t.TempDir()
+	if _, err := service.Scrape(context.Background(), &ani, true); err == nil {
+		t.Fatal("transient asset failure was hidden")
+	}
+	if _, err := os.Stat(filepath.Join(path, "[Group] Demo S01E01.mkv")); err != nil {
+		t.Fatalf("renamed media was not retained for retry: %v", err)
+	}
+	if _, err := service.Scrape(context.Background(), &ani, true); err != nil {
+		t.Fatalf("recovery scrape failed: %v", err)
+	}
+	if posterAttempts < 2 {
+		t.Fatalf("poster attempts = %d", posterAttempts)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "poster.jpg")); err != nil {
+		t.Fatalf("poster was not recovered: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary file leaked: %s", entry.Name())
+		}
+	}
+}
+
 func TestRefreshCoverUsesConfigFilesAndDoesNotOverwriteUnlessRequested(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cover")) }))
 	defer server.Close()

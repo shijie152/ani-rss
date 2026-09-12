@@ -2,6 +2,8 @@ package subscription_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
@@ -162,5 +164,48 @@ func TestServiceImportAssignsIDAndHonorsConflictPolicy(t *testing.T) {
 	}
 	if service.Items()[0].URL != "https://old.test/rss" || !service.Items()[0].Enable {
 		t.Fatalf("SKIP changed existing subscription: %#v", service.Items()[0])
+	}
+}
+
+func TestServiceDeleteFilesRequiresExplicitOptIn(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := config.Update(model.Config{"downloadPathTemplate": filepath.Join(root, "${title}")}); err != nil {
+		t.Fatal(err)
+	}
+	service := subscription.NewService(s, config, nil)
+	item := model.Ani{ID: "one", Title: "Demo", URL: "https://example.test/rss", Season: 1}
+	if err := service.Add(item); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(root, "Demo")
+	if err := os.MkdirAll(mediaPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaFile := filepath.Join(mediaPath, "episode.mkv")
+	if err := os.WriteFile(mediaFile, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete([]string{item.ID}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mediaFile); err != nil {
+		t.Fatalf("media was deleted without opt-in: %v", err)
+	}
+	if err := service.Add(item); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete([]string{item.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mediaPath); !os.IsNotExist(err) {
+		t.Fatalf("media directory remains after explicit delete, err=%v", err)
 	}
 }
