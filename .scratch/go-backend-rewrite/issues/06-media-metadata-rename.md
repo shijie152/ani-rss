@@ -6,12 +6,16 @@
 
 **Status:** ready-for-agent
 
-- [ ] TMDB/Bangumi 元数据查询、标题/评分/季集信息、封面和刮削接口可用
+- [x] TMDB/Bangumi 元数据查询、标题/评分/季集信息、封面和刮削接口可用
 - [ ] 手动刮削、批量刮削、刷新封面和更新总集数接口可用
-- [ ] 视频、字幕和图片文件按当前支持的格式被识别，其他文件不被误处理
-- [ ] 集数、季、字幕组、质量、语言和标题能从资源/文件名中稳定提取
+- [x] 视频、字幕和图片文件按当前支持的格式被识别，其他文件不被误处理
+- [x] 集数、季、字幕组、质量、语言和标题能从资源/文件名中稳定提取
 - [ ] 全局和订阅级命名模板、路径模板、自定义集数规则及文件名长度限制可用
-- [ ] 下载完成后能生成正确的媒体文件名、NFO、封面和媒体库路径
-- [ ] 字幕匹配、重复文件、已存在文件、洗版、完结和失败恢复行为可用
+- [x] 下载完成后能生成正确的媒体文件名、NFO、封面和媒体库路径
+- [x] 字幕匹配、重复文件、已存在文件、洗版、完结和失败恢复行为可用
 - [ ] 使用临时媒体库覆盖正常、重复、缺失元数据、非法路径、跨平台路径和中途失败场景
 - [ ] 现有 UI 的预览、刷新和媒体结果展示无需修改
+
+## Acceptance evidence
+
+Media tests cover TMDB season metadata, Bangumi fallback, rename, subtitle matching, NFO/cover/still generation, supported formats, duplicate protection, completed-media movement, embedded subtitles, cover refresh and transient asset recovery. Complete HTTP scrape/batch/preview acceptance, missing-metadata and invalid-path cases, cross-platform path behavior, and browser/UI smoke verification remain open.

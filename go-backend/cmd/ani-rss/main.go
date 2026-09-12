@@ -30,6 +30,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer app.Close()
+	ownedDomains := app.OwnedDomains()
 
 	server := &http.Server{
 		Addr: *listenAddress,
@@ -37,7 +38,7 @@ func main() {
 			UIDirectory: *uiDirectory,
 			JavaURL:     *javaURL,
 			GoRoutes:    app.Routes(),
-			GoDomains:   domains,
+			GoDomains:   ownedDomains,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -45,6 +46,11 @@ func main() {
 
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	schedulerDone := make(chan struct{})
+	go func() {
+		defer close(schedulerDone)
+		app.RunSchedulers(shutdownContext)
+	}()
 
 	go func() {
 		<-shutdownContext.Done()
@@ -60,6 +66,7 @@ func main() {
 		slog.Error("gateway stopped", "error", err)
 		os.Exit(1)
 	}
+	<-schedulerDone
 }
 
 func envOrDefault(name, fallback string) string {

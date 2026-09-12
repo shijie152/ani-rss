@@ -3,6 +3,7 @@ package metadata_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,5 +36,24 @@ func TestClientLooksUpTMDBSeasonAndBangumiFallback(t *testing.T) {
 	value, _, err = client.Lookup(context.Background(), model.Ani{BGMURL: "https://bgm.tv/subject/7", Title: "No TMDB"})
 	if err != nil || value.Title != "Demo CN" || value.Episodes != 12 {
 		t.Fatalf("bangumi value=%#v err=%v", value, err)
+	}
+}
+
+func TestClientUsesBangumiWhenTMDBIsDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/subjects/42" {
+			t.Fatalf("unexpected metadata path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":42,"name":"Demo JP","name_cn":"Demo CN","eps":12,"date":"2024-01-01","images":{"large":"https://img.test/poster.jpg"}}`)
+	}))
+	defer server.Close()
+	client := metadata.New(model.Config{"tmdb": false, "bgmApi": server.URL}, server.Client())
+	value, _, err := client.Lookup(context.Background(), model.Ani{Title: "Demo", BGMURL: "https://bgm.tv/subject/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Title != "Demo CN" || value.Episodes != 12 || value.Poster != "https://img.test/poster.jpg" {
+		t.Fatalf("Bangumi metadata = %#v", value)
 	}
 }

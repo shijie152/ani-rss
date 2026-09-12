@@ -95,3 +95,26 @@ func TestOwnershipRecoversLockFromExitedProcess(t *testing.T) {
 	}
 	manager.Close()
 }
+
+func TestOwnershipCloseDoesNotRemoveAReplacedOwnerLock(t *testing.T) {
+	dir := t.TempDir()
+	manager, err := ownership.NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Acquire("rss", "go"); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(dir, "runtime-rss.lock")
+	data, err := json.Marshal(map[string]any{"owner": "new-go", "pid": os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.Close()
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("replaced owner lock was removed: %v", err)
+	}
+}

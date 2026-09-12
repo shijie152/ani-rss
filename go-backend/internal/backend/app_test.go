@@ -2,6 +2,7 @@ package backend_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/backend"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
@@ -335,6 +337,78 @@ func TestHTTPRefreshDrivesRSSToQBittorrentCompletionChain(t *testing.T) {
 	}
 	if added.Load() != 1 {
 		t.Fatalf("refreshAll duplicated task: %d", added.Load())
+	}
+}
+
+func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
+	var added atomic.Int32
+	refreshed := make(chan struct{}, 1)
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = io.WriteString(w, "v4")
+		case "/api/v2/torrents/info":
+			_, _ = io.WriteString(w, "[]")
+		case "/api/v2/torrents/add":
+			added.Add(1)
+			select {
+			case refreshed <- struct{}{}:
+			default:
+			}
+			_, _ = io.WriteString(w, "Ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<rss><channel><item><title>[Group] Scheduled E01</title><enclosure url="magnet:?xt=urn:btih:SCHEDULED" length="100"/></item></channel></rss>`)
+	}))
+	defer feed.Close()
+
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"runtime", "subscriptions", "rss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if err := app.Config().Update(model.Config{
+		"downloadToolHost":     qb.URL,
+		"downloadToolPassword": "qbt_test",
+		"downloadRetry":        1,
+		"rssTimeout":           2,
+		"downloadPathTemplate": filepath.Join(t.TempDir(), "${title}"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "rss"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	item := model.Ani{ID: "scheduled", Title: "Scheduled", URL: feed.URL, Subgroup: "Group", Season: 1, Enable: true}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add scheduled subscription = %#v", response)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		app.RunSchedulers(ctx)
+		close(done)
+	}()
+	select {
+	case <-refreshed:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("Go RSS scheduler did not refresh the subscription")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Go RSS scheduler did not stop")
+	}
+	if added.Load() != 1 {
+		t.Fatalf("scheduled add count = %d", added.Load())
 	}
 }
 

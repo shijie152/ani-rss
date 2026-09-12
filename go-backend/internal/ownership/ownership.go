@@ -41,6 +41,12 @@ func (m *Manager) Acquire(domain, owner string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if current, ok := m.owned[domain]; ok {
+		if current == owner {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrAlreadyOwned, domain)
+	}
 	path := filepath.Join(m.dir, "runtime-"+safe(domain)+".lock")
 	for attempt := 0; attempt < 2; attempt++ {
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -101,18 +107,26 @@ func processAlive(pid int) bool {
 func (m *Manager) Release(domain string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.owned[domain]; !ok {
+	owner, ok := m.owned[domain]
+	if !ok {
 		return nil
 	}
 	delete(m.owned, domain)
-	return os.Remove(filepath.Join(m.dir, "runtime-"+safe(domain)+".lock"))
+	path := filepath.Join(m.dir, "runtime-"+safe(domain)+".lock")
+	if !m.ownsLock(path, owner) {
+		return nil
+	}
+	return os.Remove(path)
 }
 
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for domain := range m.owned {
-		_ = os.Remove(filepath.Join(m.dir, "runtime-"+safe(domain)+".lock"))
+	for domain, owner := range m.owned {
+		path := filepath.Join(m.dir, "runtime-"+safe(domain)+".lock")
+		if m.ownsLock(path, owner) {
+			_ = os.Remove(path)
+		}
 	}
 	m.owned = map[string]string{}
 }
@@ -122,6 +136,18 @@ func (m *Manager) Owner(domain string) (string, bool) {
 	defer m.mu.Unlock()
 	owner, ok := m.owned[domain]
 	return owner, ok
+}
+
+func (m *Manager) ownsLock(path, owner string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var info lockInfo
+	if json.Unmarshal(data, &info) != nil {
+		return false
+	}
+	return info.Owner == owner && info.PID == os.Getpid()
 }
 
 func safe(value string) string {

@@ -83,6 +83,19 @@ func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 	if !strings.Contains(history[0].InfoHash, "unique") {
 		t.Fatalf("history key = %#v", history[0])
 	}
+	if got := services.Items()[0].CurrentEpisodeNumber; got != 1 {
+		t.Fatalf("current episode after first submission = %d", got)
+	}
+	// A duplicate-only refresh must not look like a new download or rewrite
+	// progress based solely on the RSS contents.
+	servicesAgain := subscription.NewService(s, m, services.Items())
+	coordinatorAgain := &rss.Coordinator{Config: m, Subscriptions: servicesAgain, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	if _, err := coordinatorAgain.Refresh(context.Background(), servicesAgain.Items()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := servicesAgain.Items()[0].CurrentEpisodeNumber; got != 1 {
+		t.Fatalf("current episode after duplicate refresh = %d", got)
+	}
 }
 
 func TestCoordinatorLogsInAndStartsRSSTask(t *testing.T) {
@@ -224,7 +237,7 @@ func TestCoordinatorWashesSameEpisodeStandbyTaskBeforePrimarySubmit(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := config.Update(model.Config{"delete": true, "standbyRss": true, "downloadPathTemplate": "/tmp/Demo"}); err != nil {
+	if err := config.Update(model.Config{"delete": true, "deleteStandbyRSSOnly": true, "standbyRss": true, "downloadPathTemplate": "/tmp/Demo"}); err != nil {
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, config, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})

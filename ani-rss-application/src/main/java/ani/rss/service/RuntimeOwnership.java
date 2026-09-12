@@ -12,6 +12,8 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Coordinates migration-time scheduler ownership with the Go runtime.
@@ -22,6 +24,9 @@ import java.util.Map;
  */
 @Slf4j
 public final class RuntimeOwnership {
+    private static final Pattern PID_PATTERN = Pattern.compile("\"pid\"\\s*:\\s*(\\d+)");
+    private static final Pattern OWNER_PATTERN = Pattern.compile("\"owner\"\\s*:\\s*\"([^\"]+)\"");
+
     private final Path directory;
     private final Map<String, Path> acquired = new HashMap<>();
 
@@ -37,11 +42,23 @@ public final class RuntimeOwnership {
         try {
             Files.createDirectories(directory);
             Path path = directory.resolve("runtime-" + safe(domain) + ".lock");
-            try {
-                Files.createFile(path);
-            } catch (FileAlreadyExistsException e) {
-                log.warn("运行时任务域已被其他进程占用: {}", domain);
-                return false;
+            for (int attempt = 0; attempt < 2; attempt++) {
+                try {
+                    Files.createFile(path);
+                    break;
+                } catch (FileAlreadyExistsException e) {
+                    if (attempt == 0 && staleLock(path)) {
+                        try {
+                            Files.deleteIfExists(path);
+                            continue;
+                        } catch (IOException ignored) {
+                            // A concurrent owner may have replaced or retained
+                            // the lock; the next create attempt decides safely.
+                        }
+                    }
+                    log.warn("运行时任务域已被其他进程占用: {}", domain);
+                    return false;
+                }
             }
             String payload = "{\"owner\":\"java\",\"pid\":" + ProcessHandle.current().pid()
                     + ",\"acquiredAt\":\"" + Instant.now() + "\"}\n";
@@ -66,7 +83,9 @@ public final class RuntimeOwnership {
             return;
         }
         try {
-            Files.deleteIfExists(path);
+            if (ownsLock(path)) {
+                Files.deleteIfExists(path);
+            }
         } catch (IOException e) {
             log.warn("释放运行时任务所有权失败: {}", path, e);
         }
@@ -89,5 +108,37 @@ public final class RuntimeOwnership {
             }
         }
         return result.toString();
+    }
+
+    private static boolean staleLock(Path path) {
+        try {
+            String payload = Files.readString(path, StandardCharsets.UTF_8);
+            Matcher matcher = PID_PATTERN.matcher(payload);
+            if (!matcher.find()) {
+                return false;
+            }
+            long pid = Long.parseLong(matcher.group(1));
+            return ProcessHandle.of(pid).map(process -> !process.isAlive()).orElse(true);
+        } catch (Exception e) {
+            // An unreadable or malformed lock is left in place. Failing closed
+            // is safer than guessing that another runtime has exited.
+            return false;
+        }
+    }
+
+    private boolean ownsLock(Path path) {
+        try {
+            String payload = Files.readString(path, StandardCharsets.UTF_8);
+            Matcher matcher = PID_PATTERN.matcher(payload);
+            if (!matcher.find()) {
+                return false;
+            }
+            long pid = Long.parseLong(matcher.group(1));
+            Matcher owner = OWNER_PATTERN.matcher(payload);
+            return pid == ProcessHandle.current().pid()
+                    && owner.find() && "java".equals(owner.group(1));
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

@@ -6,10 +6,14 @@
 
 **Status:** ready-for-agent
 
-- [ ] 订阅列表、新增、编辑、删除和导入接口由 Go 提供，现有 UI 无需修改
-- [ ] 删除订阅时是否清理媒体文件仍由用户显式选择，默认不会误删媒体
-- [ ] 批量启用/禁用、排序、进度、总集数和下载路径设置可用
+- [x] 订阅列表、新增、编辑、删除和导入接口由 Go 提供，现有 UI 无需修改
+- [x] 删除订阅时是否清理媒体文件仍由用户显式选择，默认不会误删媒体
+- [x] 批量启用/禁用、排序、进度、总集数和下载路径设置可用
 - [ ] 订阅中的主资源、备用资源、字幕组、季、集数偏移、排除和优先级规则可被保存和读取
-- [ ] Go 重启后订阅状态保持一致，JSON Store 写入具备原子性和并发保护
+- [x] Go 重启后订阅状态保持一致，JSON Store 写入具备原子性和并发保护
 - [ ] malformed JSON、缺失字段、空订阅和重复订阅都有可诊断的错误结果
-- [ ] 订阅 HTTP contract tests 覆盖成功、校验失败、未授权和持久化恢复场景
+- [x] 订阅 HTTP contract tests 覆盖成功、校验失败、未授权和持久化恢复场景
+
+## Acceptance evidence
+
+Service and HTTP tests cover add/list/set/delete/import, explicit media deletion, batch enable, ordering, progress and total-episode updates, restart recovery, malformed/duplicate persisted data, atomic JSON writes and auth/validation/persistence responses. The full nested rule-field matrix and empty-subscription diagnostic case remain open.

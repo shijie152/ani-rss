@@ -52,6 +52,8 @@ type App struct {
 	configDir     string
 	logger        *slog.Logger
 	mu            sync.RWMutex
+	refreshMu     sync.Mutex
+	ownedDomains  []string
 }
 
 func New(options Options) (*App, error) {
@@ -74,11 +76,18 @@ func New(options Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	ownedDomains := make([]string, 0, len(options.OwnershipDomains))
 	for _, domain := range options.OwnershipDomains {
 		if err := locks.Acquire(domain, "go"); err != nil {
+			if errors.Is(err, ownership.ErrAlreadyOwned) {
+				// A Java transition runtime may still own this domain. Keep the
+				// process alive and let the Gateway route that domain to Java.
+				continue
+			}
 			locks.Close()
 			return nil, err
 		}
+		ownedDomains = append(ownedDomains, domain)
 	}
 	logger := options.Logger
 	if logger == nil {
@@ -90,12 +99,18 @@ func New(options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger}, nil
+	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, ownedDomains: ownedDomains}, nil
 }
 
 func (a *App) Config() *appconfig.Manager { return a.config }
 func (a *App) Store() store.Store         { return a.store }
 func (a *App) Auth() *auth.Authenticator  { return a.auth }
+
+// OwnedDomains returns only domains successfully claimed by this process.
+// Conflicting domains remain on the Java fallback during migration.
+func (a *App) OwnedDomains() []string {
+	return append([]string(nil), a.ownedDomains...)
+}
 
 // AcquireDomains must be called before starting Go schedulers. A caller may
 // select only the domains it has cut over; no Go task is started for the rest.
@@ -115,6 +130,41 @@ func (a *App) AcquireDomains(domains ...string) error {
 }
 
 func (a *App) Close() { a.ownership.Close() }
+
+// RunSchedulers runs the scheduler domains owned by this Go process. During
+// the first migration slice RSS is the only periodic business task migrated;
+// rename and maintenance remain Java-owned until their own cutovers.
+//
+// The method blocks until ctx is cancelled and is intended to run in one
+// goroutine from the command entrypoint.
+func (a *App) RunSchedulers(ctx context.Context) {
+	if _, owned := a.ownership.Owner("rss"); !owned {
+		return
+	}
+	interval := time.Duration(appconfig.Int(a.config.Snapshot(), "rssSleepMinutes")) * time.Minute
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	run := func() {
+		if !appconfig.Bool(a.config.Snapshot(), "rss") {
+			return
+		}
+		if err := a.refreshAllSubscriptions(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			a.logger.Warn("scheduled RSS refresh failed", "error", err)
+		}
+	}
+	run()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}
 
 func (a *App) Routes() []gateway.Route {
 	runtime := func(method, path string, handler http.Handler) gateway.Route {
@@ -437,6 +487,7 @@ func (a *App) sourceClient() (*source.Client, error) {
 		AnimeGardenHost: defaultString(appconfig.String(cfg, "animeGardenHost"), "https://api.animes.garden"),
 		BangumiAPI:      defaultString(appconfig.String(cfg, "bgmApi"), "https://api.bgm.tv"),
 		HTTPClient:      client,
+		Retries:         appconfig.Int(cfg, "downloadRetry"),
 		Subscriptions:   a.subscriptions.Items,
 	}), nil
 }
@@ -628,10 +679,7 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 }
 
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
-	coordinator, err := a.newCoordinator()
-	if err == nil {
-		_, err = coordinator.RefreshAll(r.Context())
-	}
+	err := a.refreshAllSubscriptions(r.Context())
 	if err != nil {
 		// Java exposes refreshAll as a best-effort background action. Keep the
 		// same successful UI contract while returning diagnostics to callers
@@ -663,16 +711,35 @@ func (a *App) refreshAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅不存在")
 		return
 	}
-	coordinator, err := a.newCoordinator()
-	if err == nil {
-		_, err = coordinator.Refresh(r.Context(), selected)
-	}
+	err := a.refreshSubscription(r.Context(), selected)
 	if err != nil {
 		a.logger.Warn("RSS refresh failed", "subscription", selected.ID, "error", err)
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
 	}
 	writeResult(w, http.StatusOK, nil, "已开始刷新RSS")
+}
+
+func (a *App) refreshAllSubscriptions(ctx context.Context) error {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	coordinator, err := a.newCoordinator()
+	if err != nil {
+		return err
+	}
+	_, err = coordinator.RefreshAll(ctx)
+	return err
+}
+
+func (a *App) refreshSubscription(ctx context.Context, item model.Ani) error {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	coordinator, err := a.newCoordinator()
+	if err != nil {
+		return err
+	}
+	_, err = coordinator.Refresh(ctx, item)
+	return err
 }
 
 func (a *App) previewAni(w http.ResponseWriter, r *http.Request) {

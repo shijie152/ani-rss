@@ -34,6 +34,13 @@ func New(config model.Config, client *http.Client) *Client {
 // subscription title when no id is stored. Bangumi is used as a fallback for
 // subscriptions created from a Bangumi subject when TMDB is disabled.
 func (c *Client) Lookup(ctx context.Context, ani model.Ani) (model.Metadata, map[string]any, error) {
+	tmdbEnabled, tmdbConfigured := c.Config["tmdb"].(bool)
+	if tmdbConfigured && !tmdbEnabled {
+		if subjectID := subjectID(ani.BGMURL); subjectID != "" {
+			return c.lookupBangumi(ctx, subjectID)
+		}
+		return model.Metadata{}, nil, errors.New("未启用 TMDB 且订阅没有 Bangumi subject")
+	}
 	if rawID := objectString(ani.TMDB, "id"); rawID != "" {
 		return c.lookupTMDBID(ctx, rawID, ani.OVA, ani.Season)
 	}
