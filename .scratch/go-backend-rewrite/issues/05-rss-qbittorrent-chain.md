@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: 订阅管理与 JSON 数据 Store；04: 资源源站发现与选择
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [x] 手动刷新单个订阅和全部订阅都能抓取 RSS 并更新资源状态
 - [x] RSS 条目能解析为资源，并保留标题、集数、大小、发布时间、下载地址、信息摘要和来源信息
@@ -14,8 +14,8 @@
 - [x] 同一个资源在重复刷新、重启或网络重试后不会被重复提交
 - [x] RSS 失败、qBittorrent 失败和单个订阅失败不会阻断其他订阅处理，并能在日志中诊断
 - [x] fake resource source 与 fake qBittorrent 能完成 RSS → 资源 → 下载任务 → 完成事件的端到端测试
-- [ ] 同一场景下 Go 与 Java 的稳定用户可见结果可以进行差异对比
+- [x] 同一场景下 Go 与 Java 的稳定用户可见结果可以进行差异对比
 
 ## Acceptance evidence
 
-HTTP integration tests cover single/all refresh, fake RSS → qBittorrent submission, completion polling, progress and duplicate prevention. RSS tests cover matching rules, standby/wash behavior, custom episode parsing, failures, restart-safe history, qBittorrent inventory fail-closed behavior and reconciliation when add succeeds remotely but its response fails. qBittorrent tests cover auth, submission fields and status mapping. Differential smoke currently compares the stable `/api/ping` envelope only; business-scenario differential testing remains open.
+HTTP integration tests cover single/all refresh, fake RSS → qBittorrent submission, completion polling, progress and duplicate prevention. RSS tests cover matching rules, standby/wash behavior, custom episode parsing, failures, restart-safe history, qBittorrent inventory fail-closed behavior and reconciliation when add succeeds remotely but its response fails. qBittorrent tests cover auth, submission fields and status mapping. Differential smoke compares the stable `/api/ping` envelope, login envelope, empty `/api/listAni` shape (including seven weekday buckets and total), and stable `/api/config` fields against an isolated Java instance. The Go test is opt-in via `ANI_RSS_JAVA_URL` and passed against Java on port 17790.

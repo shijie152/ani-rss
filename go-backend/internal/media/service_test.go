@@ -275,6 +275,55 @@ func TestMediaUsesSupportedFormatsAndPlaybackSizePolicy(t *testing.T) {
 	}
 }
 
+func TestCustomEpisodeRenameTemplateAndFilenameLimit(t *testing.T) {
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/3/tv/42":
+			_, _ = w.Write([]byte(`{"id":42,"name":"Demo","first_air_date":"2024-01-01","number_of_episodes":7}`))
+		case "/3/tv/42/season/2":
+			_, _ = w.Write([]byte(`{"episodes":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer metadataServer.Close()
+
+	config := &fakeConfig{value: model.Config{
+		"tmdb": true, "tmdbApi": metadataServer.URL, "tmdbApiKey": "test", "tmdbImage": metadataServer.URL,
+		"renameTemplate": "${title}-${subgroup}-${seasonFormat}-${episodeFormat}-${resolution}-${language}",
+	}}
+	path := t.TempDir()
+	if err := os.WriteFile(filepath.Join(path, "Episode-07 [1080p] chs.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ani := model.Ani{ID: "custom", Title: "Show", URL: "https://example.test/rss", Season: 2, Subgroup: "Group", TMDB: map[string]any{"id": "42"}, CustomEpisode: true, CustomEpisodeStr: `(?:Episode-)([0-9]+)`, CustomEpisodeGroupIndex: 1}
+	service := media.New(config, metadata.New(config.Snapshot(), metadataServer.Client()), metadataServer.Client(), func(model.Ani) (string, error) { return path, nil })
+	if _, err := service.Scrape(context.Background(), &ani, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "Show-Group-02-07-1080p-chs.mkv")); err != nil {
+		t.Fatalf("custom template output missing: %v", err)
+	}
+
+	limitedConfig := &fakeConfig{value: model.Config{
+		"tmdb": true, "tmdbApi": metadataServer.URL, "tmdbApiKey": "test", "tmdbImage": metadataServer.URL,
+		"renameTemplate": "${title}-${episode}", "maxFileNameLength": 8,
+	}}
+	limitedPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(limitedPath, "Episode-07.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	limited := media.New(limitedConfig, metadata.New(limitedConfig.Snapshot(), metadataServer.Client()), metadataServer.Client(), func(model.Ani) (string, error) { return limitedPath, nil })
+	limitedAni := model.Ani{ID: "limited", Title: "LongTitle", URL: "https://example.test/rss", Season: 2, TMDB: map[string]any{"id": "42"}, CustomEpisode: true, CustomEpisodeStr: `(?:Episode-)([0-9]+)`, CustomEpisodeGroupIndex: 1}
+	if _, err := limited.Scrape(context.Background(), &limitedAni, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(limitedPath, "LongTitl.mkv")); err != nil {
+		t.Fatalf("filename limit output missing: %v", err)
+	}
+}
+
 type fakeConfig struct{ value model.Config }
 
 func (f *fakeConfig) Snapshot() model.Config { return f.value }

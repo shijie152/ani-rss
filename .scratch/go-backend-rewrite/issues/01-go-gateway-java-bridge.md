@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [x] Go Gateway 能监听当前对外端口，并可配置 Java 过渡后端地址
 - [x] 现有 UI 静态资源可以从 Go Gateway 正常加载，且无需修改 UI

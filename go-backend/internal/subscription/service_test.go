@@ -114,6 +114,31 @@ func TestServiceListProvidesPinyinAndJavaReleaseOrdering(t *testing.T) {
 	}
 }
 
+func TestDownloadPathResolvesJavaTemplateFieldsAndDecemberQuarter(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := config.Update(model.Config{"downloadPathTemplate": filepath.Join(root, "${year}-${monthFormat}-${quarterName}-${seasonFormat}-${tmdbYear}-${tmdbid}-${bgmId}-${letter}-${subgroup}")}); err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "template", Title: "测试", URL: "https://example.test/rss", ReleaseDate: "2025-12-15", Season: 1, Subgroup: "Group", BGMURL: "https://bgm.tv/subject/99", TMDB: map[string]any{"id": "42", "first_air_date": "2025-12-01"}}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	path, err := service.DownloadPath(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "2026-12-冬-01-2025-42-99-cs-Group")
+	if got := path["downloadPath"]; got != want {
+		t.Fatalf("download path = %q, want %q", got, want)
+	}
+}
+
 func TestServiceUpdatesTotalEpisodesFromInjectedBangumiResolver(t *testing.T) {
 	s, err := store.NewJSONStore(t.TempDir())
 	if err != nil {

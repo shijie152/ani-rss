@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Go Gateway 与 Java 过渡桥接
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [x] 当前 UI 的配置读取、配置保存、健康检查和登录流程无需修改即可工作
 - [x] 登录密码、Token/session 生命周期、登录次数限制、API Key 和 IP 白名单行为符合当前外部契约

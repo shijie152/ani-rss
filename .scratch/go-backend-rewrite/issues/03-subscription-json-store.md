@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: 运行时所有权、配置与认证基础
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [x] 订阅列表、新增、编辑、删除和导入接口由 Go 提供，现有 UI 无需修改
 - [x] 删除订阅时是否清理媒体文件仍由用户显式选择，默认不会误删媒体

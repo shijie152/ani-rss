@@ -1246,7 +1246,8 @@ func (a *App) allowedMediaPath(path string) bool {
 	if err != nil || !media.IsSupported(path) {
 		return false
 	}
-	if relative, relErr := filepath.Rel(a.configDir, path); relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	filesRoot, filesErr := filepath.Abs(filepath.Join(a.configDir, "files"))
+	if filesErr == nil && isWithinPath(filesRoot, path) {
 		return true
 	}
 	for _, item := range a.subscriptions.Items() {
@@ -1261,6 +1262,11 @@ func (a *App) allowedMediaPath(path string) bool {
 		}
 	}
 	return false
+}
+
+func isWithinPath(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func sourceError(err error) string {

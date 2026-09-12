@@ -3,6 +3,7 @@ package backend_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -303,6 +304,59 @@ func TestDifferentialPingAgainstJavaWhenConfigured(t *testing.T) {
 			t.Fatalf("differential ping %s: Go=%#v Java=%#v", key, goResult[key], javaResult[key])
 		}
 	}
+	goToken := login(t, server.URL)
+	javaLogin := callJSON(t, javaURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})
+	if javaLogin["code"] != float64(http.StatusOK) {
+		t.Fatalf("Java login = %#v", javaLogin)
+	}
+	javaToken, ok := javaLogin["data"].(string)
+	if !ok || javaToken == "" {
+		t.Fatalf("Java login token = %#v", javaLogin)
+	}
+	goList := callJSON(t, server.URL+"/api/listAni", goToken, nil)
+	javaList := callJSON(t, javaURL+"/api/listAni", javaToken, nil)
+	compareListAni(t, goList, javaList)
+	goConfig := callJSON(t, server.URL+"/api/config", goToken, nil)
+	javaConfig := callJSON(t, javaURL+"/api/config", javaToken, nil)
+	compareStableConfig(t, goConfig, javaConfig)
+}
+
+func compareListAni(t *testing.T, left, right map[string]any) {
+	t.Helper()
+	if left["code"] != right["code"] || left["message"] != right["message"] {
+		t.Fatalf("listAni envelope differs: Go=%#v Java=%#v", left, right)
+	}
+	leftData, leftOK := left["data"].(map[string]any)
+	rightData, rightOK := right["data"].(map[string]any)
+	if !leftOK || !rightOK || leftData["total"] != rightData["total"] {
+		t.Fatalf("listAni total differs: Go=%#v Java=%#v", leftData, rightData)
+	}
+	leftWeeks, leftOK := leftData["weekList"].([]any)
+	rightWeeks, rightOK := rightData["weekList"].([]any)
+	if !leftOK || !rightOK || len(leftWeeks) != len(rightWeeks) {
+		t.Fatalf("listAni week count differs: Go=%#v Java=%#v", leftData, rightData)
+	}
+	for index := range leftWeeks {
+		leftWeek := leftWeeks[index].(map[string]any)
+		rightWeek := rightWeeks[index].(map[string]any)
+		if leftWeek["weekLabel"] != rightWeek["weekLabel"] || len(leftWeek["items"].([]any)) != len(rightWeek["items"].([]any)) {
+			t.Fatalf("listAni week %d differs: Go=%#v Java=%#v", index, leftWeek, rightWeek)
+		}
+	}
+}
+
+func compareStableConfig(t *testing.T, left, right map[string]any) {
+	t.Helper()
+	leftData, leftOK := left["data"].(map[string]any)
+	rightData, rightOK := right["data"].(map[string]any)
+	if !leftOK || !rightOK {
+		t.Fatalf("config data missing: Go=%#v Java=%#v", left, right)
+	}
+	for _, key := range []string{"downloadToolType", "rssTimeout", "sortType", "tmdb"} {
+		if leftData[key] != rightData[key] {
+			t.Fatalf("config %s differs: Go=%#v Java=%#v", key, leftData[key], rightData[key])
+		}
+	}
 }
 
 func TestHTTPRefreshDrivesRSSToQBittorrentCompletionChain(t *testing.T) {
@@ -481,6 +535,58 @@ func TestHTTPMediaRoutesUseMetadataAndFilesystemContract(t *testing.T) {
 	}
 }
 
+func TestHTTPMediaRejectsMissingMetadataAndFileTraversal(t *testing.T) {
+	metadataServer := httptest.NewServer(http.NotFoundHandler())
+	defer metadataServer.Close()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "files", "safe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "files", "safe", "video.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.mkv")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := backend.New(backend.Options{ConfigDir: root, OwnershipDomains: []string{"runtime", "subscriptions", "media"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "media"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+
+	allowed := get(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte("safe/video.mkv")), token)
+	if allowed.StatusCode != http.StatusOK {
+		allowed.Body.Close()
+		t.Fatalf("allowed media file status = %d", allowed.StatusCode)
+	}
+	allowedBody, _ := io.ReadAll(allowed.Body)
+	allowed.Body.Close()
+	if string(allowedBody) != "video" {
+		t.Fatalf("allowed media file body = %q", allowedBody)
+	}
+
+	traversal := get(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte("../outside.mkv")), token)
+	body, _ := io.ReadAll(traversal.Body)
+	traversal.Body.Close()
+	var denied map[string]any
+	if err := json.Unmarshal(body, &denied); err != nil || denied["code"] != float64(http.StatusForbidden) {
+		t.Fatalf("traversal response = status %d body=%q", traversal.StatusCode, body)
+	}
+
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"tmdbApi": metadataServer.URL, "tmdbImage": metadataServer.URL, "tmdbApiKey": "test", "downloadPathTemplate": filepath.Join(root, "library", "${title}")}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set missing-metadata config = %#v", response)
+	}
+	missing := callJSON(t, server.URL+"/api/scrape?force=true", token, model.Ani{ID: "missing", Title: "Missing", URL: "https://example.test/rss", Season: 1, TMDB: map[string]any{"id": "404"}})
+	if missing["code"] != float64(http.StatusInternalServerError) || missing["message"] == "" {
+		t.Fatalf("missing metadata response = %#v", missing)
+	}
+}
+
 func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
 	var added atomic.Int32
 	refreshed := make(chan struct{}, 1)
@@ -627,4 +733,18 @@ func callJSON(t *testing.T, target, token string, body any) map[string]any {
 		t.Fatalf("%s: %v", string(data), err)
 	}
 	return payload
+}
+
+func get(t *testing.T, target, token string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }

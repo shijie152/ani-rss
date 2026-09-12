@@ -526,6 +526,9 @@ func pathFor(cfg model.Config, item model.Ani, override string) (string, error) 
 		tmdbYear = year
 	}
 	quarter, quarterName := quarter(release.Month())
+	if release.Month() == time.December {
+		year++
+	}
 	replacements := map[string]string{
 		"${title}": item.Title, "${themoviedbName}": item.TheMovieDBName, "${jpTitle}": item.JPTitle,
 		"${season}": fmt.Sprintf("%d", item.Season), "${seasonFormat}": fmt.Sprintf("%02d", item.Season),
@@ -564,6 +567,10 @@ func initial(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
+	}
+	_, initials := titlePinyin(value)
+	if initials != "" {
+		return initials
 	}
 	for _, runeValue := range value {
 		if (runeValue >= 'a' && runeValue <= 'z') || (runeValue >= 'A' && runeValue <= 'Z') {

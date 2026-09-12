@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: 运行时所有权、配置与认证基础；03: 订阅管理与 JSON 数据 Store
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [x] Mikan 搜索、季度列表、番剧详情和字幕组/RSS 链接接口可用
 - [x] AniBT 搜索、季度列表和字幕组/RSS 链接接口可用
