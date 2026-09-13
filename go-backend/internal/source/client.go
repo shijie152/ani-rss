@@ -71,7 +71,13 @@ func (c *Client) Mikan(text string, season map[string]any) (map[string]any, erro
 		}
 		return c.mikanDetail(target, body)
 	}
-	target := c.mikanHost + "/Home/Search"
+	// The legacy UI uses the Mikan home page for an unfiltered request. That
+	// page contains the current season and the seasonal catalogue; /Home/Search
+	// without a search term is intentionally an empty search result page.
+	target := c.mikanHost
+	if strings.TrimSpace(text) != "" {
+		target += "/Home/Search"
+	}
 	query := url.Values{}
 	if strings.TrimSpace(text) != "" {
 		query.Set("searchstr", text)

@@ -86,6 +86,24 @@ func TestMikanSeasonalAndAnimeGardenUIFields(t *testing.T) {
 	}
 }
 
+func TestMikanEmptyRequestLoadsCurrentSeasonFromHomePage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Fatalf("Mikan empty request path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`<div class="date-select"><div class="date-text">2026 夏</div><div class="dropdown-menu"><ul><li><a data-year="2026" data-season="夏">夏</a></li></ul></div></div><div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><span data-src="/cover.jpg"></span><a href="/Home/Bangumi/123">Demo</a></li></ul></div>`))
+	}))
+	defer server.Close()
+
+	result, err := source.New(source.Options{MikanHost: server.URL}).Mikan("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["totalItems"] != 1 || len(result["seasons"].([]any)) != 1 {
+		t.Fatalf("home page result = %#v", result)
+	}
+}
+
 func TestAniBTAnimeGardenAndBangumiClientsTransformResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body string
