@@ -718,18 +718,11 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	username := appconfig.String(cfg, "downloadToolUsername")
-	password := appconfig.String(cfg, "downloadToolPassword")
-	apiKey := ""
-	if username == "" {
-		apiKey = password
+	adapter, err := downloader.New(cfg, client)
+	if err != nil {
+		return nil, err
 	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: &downloader.QBittorrent{
-		Host: appconfig.String(cfg, "downloadToolHost"), Username: username, Password: password, APIKey: apiKey, Client: client,
-		ContentLayout: appconfig.String(cfg, "qbContentLayout"), UseDownloadPath: appconfig.Bool(cfg, "qbUseDownloadPath"),
-		RatioLimit: int64(appconfig.Int(cfg, "ratioLimit")), SeedingTimeLimit: int64(appconfig.Int(cfg, "seedingTimeLimit")),
-		InactiveSeedingTimeLimit: int64(appconfig.Int(cfg, "inactiveSeedingTimeLimit")), UpLimit: int64(appconfig.Int(cfg, "upLimit")) * 1024, DlLimit: int64(appconfig.Int(cfg, "dlLimit")) * 1024,
-	}}, nil
+	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter}, nil
 }
 
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
@@ -868,13 +861,11 @@ func (a *App) downloadLoginTest(w http.ResponseWriter, r *http.Request) {
 	}
 	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
 	if err == nil {
-		username := appconfig.String(cfg, "downloadToolUsername")
-		password := appconfig.String(cfg, "downloadToolPassword")
-		apiKey := ""
-		if username == "" {
-			apiKey = password
+		var adapter downloader.Adapter
+		adapter, err = downloader.New(cfg, client)
+		if err == nil {
+			err = adapter.Login(r.Context())
 		}
-		err = (&downloader.QBittorrent{Host: appconfig.String(cfg, "downloadToolHost"), Username: username, Password: password, APIKey: apiKey, Client: client}).Login(r.Context())
 	}
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "登录失败")

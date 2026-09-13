@@ -24,14 +24,14 @@ type Coordinator struct {
 	Subscriptions *subscription.Service
 	History       store.HistoryStore
 	HTTPClient    *http.Client
-	QB            *downloader.QBittorrent
+	QB            downloader.Adapter
 	Retry         int
 	mu            sync.Mutex
 }
 
 func (c *Coordinator) Refresh(ctx context.Context, item model.Ani) ([]model.Resource, error) {
 	if c.QB == nil {
-		return nil, errors.New("qBittorrent is not configured")
+		return nil, errors.New("下载器未配置")
 	}
 	feeds := []struct {
 		url, subgroup string
@@ -257,7 +257,7 @@ func (c *Coordinator) RefreshAll(ctx context.Context) (map[string][]model.Resour
 // protocol supplies the status events.
 func (c *Coordinator) WaitForCompletion(ctx context.Context, hash string, interval time.Duration) (model.Torrent, error) {
 	if c.QB == nil {
-		return model.Torrent{}, errors.New("qBittorrent is not configured")
+		return model.Torrent{}, errors.New("下载器未配置")
 	}
 	if err := c.QB.Login(ctx); err != nil {
 		return model.Torrent{}, err
@@ -286,7 +286,7 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		// Without a successful inventory we cannot distinguish a new resource
 		// from a task restored manually or created by a previous retry. Failing
 		// closed is required for idempotent download submission.
-		return nil, fmt.Errorf("查询 qBittorrent 任务失败: %w", taskErr)
+		return nil, fmt.Errorf("查询下载器任务失败: %w", taskErr)
 	}
 	for _, task := range tasks {
 		if task.Hash != "" {

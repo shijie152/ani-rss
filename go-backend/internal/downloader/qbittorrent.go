@@ -351,6 +351,12 @@ func (q *QBittorrent) SetSavePath(ctx context.Context, hash, path string) error 
 func (q *QBittorrent) Start(ctx context.Context, hash string) error {
 	return q.postForm(ctx, "/api/v2/torrents/start", url.Values{"hashes": []string{hash}})
 }
+
+// UpdateTrackers is intentionally a no-op for the global qBittorrent
+// adapter. qBittorrent accepts tracker updates per torrent, while the shared
+// maintenance operation does not have a task selection yet. Returning nil
+// preserves the Java adapter's best-effort behavior for this operation.
+func (q *QBittorrent) UpdateTrackers(_ context.Context, _ []string) error { return nil }
 func (q *QBittorrent) postForm(ctx context.Context, path string, form url.Values) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint(path), strings.NewReader(form.Encode()))
 	if err != nil {
