@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
 )
 
 type logBuffer struct {
@@ -152,7 +154,35 @@ func (a *App) downloadLogs(w http.ResponseWriter, _ *http.Request) {
 func (a *App) exportConfig(w http.ResponseWriter, _ *http.Request) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	for _, root := range []string{"files", "torrents", "config.v2.json", "ani.v2.json", "resources.v2.json"} {
+	writeEntry := func(name string, data []byte) {
+		writer, err := archive.Create(name)
+		if err == nil {
+			_, _ = writer.Write(data)
+		}
+	}
+	if config, err := a.store.LoadConfig(); err == nil {
+		if data, marshalErr := json.MarshalIndent(config, "", "  "); marshalErr == nil {
+			writeEntry("config.v2.json", append(data, '\n'))
+		}
+	}
+	if items, err := a.store.LoadSubscriptions(); err == nil {
+		if data, marshalErr := json.MarshalIndent(items, "", "  "); marshalErr == nil {
+			writeEntry("ani.v2.json", append(data, '\n'))
+		}
+	}
+	if resources, err := a.history.LoadResources(); err == nil {
+		if data, marshalErr := json.MarshalIndent(resources, "", "  "); marshalErr == nil {
+			writeEntry("resources.v2.json", append(data, '\n'))
+		}
+	}
+	if a.tasks != nil {
+		if tasks, err := a.tasks.LoadTasks(); err == nil {
+			if data, marshalErr := json.MarshalIndent(tasks, "", "  "); marshalErr == nil {
+				writeEntry("tasks.v2.json", append(data, '\n'))
+			}
+		}
+	}
+	for _, root := range []string{"files", "torrents"} {
 		full := filepath.Join(a.configDir, root)
 		_ = filepath.WalkDir(full, func(filePath string, entry os.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
@@ -166,10 +196,7 @@ func (a *App) exportConfig(w http.ResponseWriter, _ *http.Request) {
 			if relErr != nil {
 				return nil
 			}
-			writer, createErr := archive.Create(filepath.ToSlash(relative))
-			if createErr == nil {
-				_, _ = writer.Write(data)
-			}
+			writeEntry(filepath.ToSlash(relative), data)
 			return nil
 		})
 	}
@@ -222,6 +249,11 @@ func (a *App) restoreZip(data []byte) error {
 		data []byte
 	}
 	pending := []pendingFile{}
+	var config model.Config
+	var items []model.Ani
+	var resources []model.Resource
+	var tasks []model.Torrent
+	hasConfig, hasItems, hasResources, hasTasks := false, false, false, false
 	for _, entry := range reader.File {
 		if entry.FileInfo().IsDir() {
 			continue
@@ -247,10 +279,78 @@ func (a *App) restoreZip(data []byte) error {
 		if readErr != nil || len(content) > maxZipEntryBytes {
 			return errors.New("备份文件读取失败")
 		}
+		switch name {
+		case "config.v2.json":
+			if err := json.Unmarshal(content, &config); err != nil || config == nil {
+				return errors.New("配置备份格式异常")
+			}
+			hasConfig = true
+		case "ani.v2.json":
+			if err := json.Unmarshal(content, &items); err != nil || items == nil {
+				return errors.New("订阅备份格式异常")
+			}
+			hasItems = true
+		case "resources.v2.json":
+			if err := json.Unmarshal(content, &resources); err != nil || resources == nil {
+				return errors.New("资源历史备份格式异常")
+			}
+			hasResources = true
+		case "tasks.v2.json":
+			if err := json.Unmarshal(content, &tasks); err != nil || tasks == nil {
+				return errors.New("下载任务备份格式异常")
+			}
+			hasTasks = true
+		}
 		pending = append(pending, pendingFile{name: name, data: content})
 	}
 	if len(pending) == 0 {
 		return errors.New("备份为空")
+	}
+	currentConfig, configErr := a.store.LoadConfig()
+	currentItems, itemsErr := a.store.LoadSubscriptions()
+	currentResources, resourcesErr := a.history.LoadResources()
+	currentTasks := []model.Torrent{}
+	var tasksErr error
+	if a.tasks != nil {
+		currentTasks, tasksErr = a.tasks.LoadTasks()
+	}
+	if configErr != nil || itemsErr != nil || resourcesErr != nil || tasksErr != nil {
+		return errors.New("读取当前应用状态失败")
+	}
+	if !hasConfig {
+		config = currentConfig
+	} else {
+		config = appconfig.MergeConfig(currentConfig, config)
+	}
+	if !hasItems {
+		items = currentItems
+	}
+	if !hasResources {
+		resources = currentResources
+	}
+	if !hasTasks {
+		tasks = currentTasks
+	}
+	if err := subscription.ValidateItems(items); err != nil {
+		return fmt.Errorf("订阅备份校验失败: %w", err)
+	}
+	if err := appconfig.Normalize(config); err != nil {
+		return fmt.Errorf("配置备份校验失败: %w", err)
+	}
+	if replacer, ok := a.store.(interface {
+		ReplaceStateWithTasks(model.Config, []model.Ani, []model.Resource, []model.Torrent) error
+	}); ok {
+		if err := replacer.ReplaceStateWithTasks(config, items, resources, tasks); err != nil {
+			return err
+		}
+	} else if replacer, ok := a.store.(interface {
+		ReplaceState(model.Config, []model.Ani, []model.Resource) error
+	}); ok {
+		if err := replacer.ReplaceState(config, items, resources); err != nil {
+			return err
+		}
+	} else {
+		return errors.New("当前存储不支持原子恢复")
 	}
 	// The Java import contract replaces the downloader cache as well as the
 	// JSON state. This is explicit user-requested replacement, scoped to the
@@ -259,6 +359,9 @@ func (a *App) restoreZip(data []byte) error {
 		return err
 	}
 	for _, item := range pending {
+		if item.name == "config.v2.json" || item.name == "ani.v2.json" || item.name == "resources.v2.json" || item.name == "tasks.v2.json" {
+			continue
+		}
 		target := filepath.Join(a.configDir, filepath.FromSlash(item.name))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
@@ -280,7 +383,7 @@ func safeArchiveName(value string) (string, bool) {
 }
 func allowedBackupName(name string) bool {
 	base := filepath.Base(name)
-	return base == "config.v2.json" || base == "ani.v2.json" || base == "resources.v2.json" || strings.HasPrefix(name, "files/") || strings.HasPrefix(name, "torrents/") || strings.HasPrefix(name, "webui/")
+	return base == "config.v2.json" || base == "ani.v2.json" || base == "resources.v2.json" || base == "tasks.v2.json" || strings.HasPrefix(name, "files/") || strings.HasPrefix(name, "torrents/") || strings.HasPrefix(name, "webui/")
 }
 
 func (a *App) clearCache(w http.ResponseWriter, _ *http.Request) {

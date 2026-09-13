@@ -20,9 +20,22 @@ type Store interface {
 	SaveSubscriptions([]model.Ani) error
 }
 
+// FullStore is the final application persistence boundary. Store remains
+// intentionally small for domain services that do not need resource history.
+type FullStore interface {
+	Store
+	HistoryStore
+	TaskStore
+}
+
 type HistoryStore interface {
 	LoadResources() ([]model.Resource, error)
 	SaveResources([]model.Resource) error
+}
+
+type TaskStore interface {
+	LoadTasks() ([]model.Torrent, error)
+	SaveTasks([]model.Torrent) error
 }
 
 type JSONStore struct {
@@ -113,6 +126,29 @@ func (s *JSONStore) SaveResources(items []model.Resource) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return writeJSONAtomic(filepath.Join(s.dir, "resources.v2.json"), items)
+}
+
+func (s *JSONStore) LoadTasks() ([]model.Torrent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.dir, "tasks.v2.json")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return []model.Torrent{}, nil
+	}
+	var items []model.Torrent
+	if err := readJSON(path, &items); err != nil {
+		return nil, fmt.Errorf("read tasks.v2.json: %w", err)
+	}
+	if items == nil {
+		return nil, errors.New("tasks.v2.json contains null instead of an array")
+	}
+	return items, nil
+}
+
+func (s *JSONStore) SaveTasks(items []model.Torrent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return writeJSONAtomic(filepath.Join(s.dir, "tasks.v2.json"), items)
 }
 
 func readJSON(path string, target any) error {

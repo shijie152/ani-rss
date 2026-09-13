@@ -51,7 +51,9 @@ type Options struct {
 }
 
 type App struct {
-	store         *store.JSONStore
+	store         store.Store
+	history       store.HistoryStore
+	tasks         store.TaskStore
 	config        *appconfig.Manager
 	auth          *auth.Authenticator
 	ownership     *ownership.Manager
@@ -70,22 +72,22 @@ type App struct {
 }
 
 func New(options Options) (*App, error) {
-	jsonStore, err := store.NewJSONStore(options.ConfigDir)
+	applicationStore, err := store.NewSQLiteStore(options.ConfigDir)
 	if err != nil {
 		return nil, err
 	}
-	manager, err := appconfig.NewManager(jsonStore)
+	manager, err := appconfig.NewManager(applicationStore)
 	if err != nil {
 		return nil, err
 	}
-	items, err := jsonStore.LoadSubscriptions()
+	items, err := applicationStore.LoadSubscriptions()
 	if err != nil {
 		return nil, err
 	}
 	if err := subscription.ValidateItems(items); err != nil {
 		return nil, fmt.Errorf("订阅数据校验失败: %w", err)
 	}
-	locks, err := ownership.NewManager(filepath.Join(jsonStore.Directory(), "locks"))
+	locks, err := ownership.NewManager(filepath.Join(applicationStore.Directory(), "locks"))
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +150,7 @@ func New(options Options) (*App, error) {
 			ownedDomains = filtered
 		}
 	}
-	app := &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired, swagger: options.SwaggerEnabled}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired, swagger: options.SwaggerEnabled}
 	if options.MCPEnabled {
 		app.mcp = mcp.New(mcp.Config{Version: options.Version, Authorize: app.auth.APIKey, Tools: app.mcpTools()})
 	}
@@ -197,7 +199,12 @@ func (a *App) AcquireDomains(domains ...string) error {
 	return nil
 }
 
-func (a *App) Close() { a.ownership.Close() }
+func (a *App) Close() {
+	a.ownership.Close()
+	if closer, ok := a.store.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+}
 
 // RunSchedulers runs the scheduler domains owned by this Go process. During
 // the first migration slice RSS is the only periodic business task migrated;
@@ -776,7 +783,7 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, ConfigDir: a.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
+	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.history, HTTPClient: client, ConfigDir: a.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
 		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
 			return a.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
 		}}, nil
@@ -888,7 +895,7 @@ func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
 			hashes[strings.ToLower(value)] = true
 		}
 	}
-	resources, err := a.store.LoadResources()
+	resources, err := a.history.LoadResources()
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -900,7 +907,7 @@ func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
 		}
 		kept = append(kept, value)
 	}
-	if err := a.store.SaveResources(kept); err != nil {
+	if err := a.history.SaveResources(kept); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
@@ -918,6 +925,11 @@ func (a *App) torrentsInfos(w http.ResponseWriter, r *http.Request) {
 			var result []model.Torrent
 			result, err = coordinator.QB.Torrents(r.Context())
 			if err == nil {
+				if a.tasks != nil {
+					if saveErr := a.tasks.SaveTasks(result); saveErr != nil {
+						a.logger.Warn("download task snapshot could not be persisted", "error", saveErr)
+					}
+				}
 				writeResult(w, http.StatusOK, result, "success")
 				return
 			}

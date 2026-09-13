@@ -51,6 +51,11 @@ func (m *Manager) Snapshot() model.Config {
 	return clone(m.cfg)
 }
 
+// MergeConfig applies a null-ignoring configuration patch to a base snapshot.
+// It is exported for backup/import validation; business modules should use
+// Manager.Update for ordinary live changes.
+func MergeConfig(base, patch model.Config) model.Config { return merge(base, patch) }
+
 // Reload makes an imported backup visible to the running process without
 // changing the persisted data again. Callers should reload dependent domains
 // (subscriptions, caches) after this method succeeds.
