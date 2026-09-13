@@ -60,6 +60,8 @@ type App struct {
 	refreshMu     sync.Mutex
 	ownedDomains  []string
 	stateRequired bool
+	version       string
+	logBuffer     *logBuffer
 }
 
 func New(options Options) (*App, error) {
@@ -96,8 +98,11 @@ func New(options Options) (*App, error) {
 		ownedDomains = append(ownedDomains, domain)
 	}
 	logger := options.Logger
+	logs := newLogBuffer(appconfig.Int(manager.Snapshot(), "logsMax"))
 	if logger == nil {
-		logger = slog.Default()
+		logger = slog.New(logs)
+	} else {
+		logger = slog.New(&teeHandler{first: logs, second: logger.Handler()})
 	}
 	stateRequired := false
 	for _, domain := range options.OwnershipDomains {
@@ -138,7 +143,7 @@ func New(options Options) (*App, error) {
 			ownedDomains = filtered
 		}
 	}
-	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired}, nil
+	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired}, nil
 }
 
 func (a *App) Config() *appconfig.Manager { return a.config }
@@ -242,6 +247,22 @@ func (a *App) Routes() []gateway.Route {
 		runtime(http.MethodGet, "/api/custom.js", http.HandlerFunc(a.customJS)),
 		runtime(http.MethodGet, "/api/custom.css", http.HandlerFunc(a.customCSS)),
 		runtime(http.MethodPost, "/api/testProxy", a.protected(a.testProxy)),
+		runtime(http.MethodPost, "/api/logs", a.protected(a.logs)),
+		runtime(http.MethodPost, "/api/clearLogs", a.protected(a.clearLogs)),
+		runtime(http.MethodGet, "/api/downloadLogs", a.protected(a.downloadLogs)),
+		runtime(http.MethodPost, "/api/clearCache", a.protected(a.clearCache)),
+		runtime(http.MethodPost, "/api/trackersUpdate", a.protected(a.trackersUpdate)),
+		runtime(http.MethodGet, "/api/exportConfig", a.protected(a.exportConfig)),
+		runtime(http.MethodPost, "/api/importConfig", a.protected(a.importConfig)),
+		runtime(http.MethodGet, "/api/proxyImage", a.protected(a.proxyImage)),
+		runtime(http.MethodGet, "/api/calendar.ics", a.protected(a.calendar)),
+		runtime(http.MethodPost, "/api/about", a.protected(a.about)),
+		runtime(http.MethodPost, "/api/update", a.protected(a.update)),
+		runtime(http.MethodPost, "/api/stop", a.protected(a.stop)),
+		runtime(http.MethodPost, "/api/webui/upload", a.protected(a.webuiUpload)),
+		runtime(http.MethodPost, "/api/webui/delete", a.protected(a.webuiDelete)),
+		runtime(http.MethodPost, "/api/webui/getUpdate", a.protected(a.webuiGetUpdate)),
+		runtime(http.MethodPost, "/api/webui/update", a.protected(a.webuiUpdate)),
 		runtime(http.MethodPost, "/api/testNotification", a.protected(a.testNotification)),
 		runtime(http.MethodPost, "/api/newNotification", a.protected(a.newNotification)),
 		runtime(http.MethodPost, "/api/getTgUpdates", a.protected(a.getTgUpdates)),

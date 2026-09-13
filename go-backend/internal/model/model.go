@@ -18,6 +18,14 @@ type Login struct {
 	Password string `json:"password"`
 }
 
+type Log struct {
+	TS         int64  `json:"ts"`
+	Message    string `json:"message"`
+	Level      string `json:"level"`
+	LoggerName string `json:"loggerName"`
+	ThreadName string `json:"threadName"`
+}
+
 type StandbyRSS struct {
 	Label  string `json:"label,omitempty"`
 	URL    string `json:"url,omitempty"`

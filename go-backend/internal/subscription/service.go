@@ -398,6 +398,20 @@ func (s *Service) Items() []model.Ani {
 	return append([]model.Ani(nil), s.items...)
 }
 
+func (s *Service) Reload() error {
+	items, err := s.store.LoadSubscriptions()
+	if err != nil {
+		return err
+	}
+	if err := ValidateItems(items); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.items = append([]model.Ani(nil), items...)
+	s.mu.Unlock()
+	return nil
+}
+
 // ValidateItems checks imported/persisted subscriptions before they enter the
 // live service. Keeping this at the domain boundary prevents malformed JSON
 // from becoming a silently unusable subscription after restart.

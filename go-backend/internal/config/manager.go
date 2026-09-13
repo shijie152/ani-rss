@@ -51,6 +51,24 @@ func (m *Manager) Snapshot() model.Config {
 	return clone(m.cfg)
 }
 
+// Reload makes an imported backup visible to the running process without
+// changing the persisted data again. Callers should reload dependent domains
+// (subscriptions, caches) after this method succeeds.
+func (m *Manager) Reload() error {
+	raw, err := m.store.LoadConfig()
+	if err != nil {
+		return err
+	}
+	cfg := merge(model.DefaultConfig(), raw)
+	if err := Normalize(cfg); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.cfg = cfg
+	m.mu.Unlock()
+	return nil
+}
+
 // PublicSnapshot removes secrets exactly where the current ConfigService does:
 // the UI can display and edit the rest of the configuration without learning
 // implementation details of the Go runtime.

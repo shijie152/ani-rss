@@ -391,11 +391,32 @@ func (q *QBittorrent) SetFilePriority(ctx context.Context, hash string, index, p
 	})
 }
 
-// UpdateTrackers is intentionally a no-op for the global qBittorrent
-// adapter. qBittorrent accepts tracker updates per torrent, while the shared
-// maintenance operation does not have a task selection yet. Returning nil
-// preserves the Java adapter's best-effort behavior for this operation.
-func (q *QBittorrent) UpdateTrackers(_ context.Context, _ []string) error { return nil }
+func (q *QBittorrent) UpdateTrackers(ctx context.Context, trackers []string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/app/preferences"), nil)
+	if err != nil {
+		return err
+	}
+	q.authorize(request)
+	response, err := q.httpClient().Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("qBittorrent preferences returned HTTP %d", response.StatusCode)
+	}
+	var preferences map[string]any
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&preferences); err != nil {
+		return err
+	}
+	preferences["add_trackers"] = strings.Join(trackers, "\n")
+	preferences["add_trackers_enabled"] = true
+	body, err := json.Marshal(preferences)
+	if err != nil {
+		return err
+	}
+	return q.postForm(ctx, "/api/v2/app/setPreferences", url.Values{"json": []string{string(body)}})
+}
 func (q *QBittorrent) postForm(ctx context.Context, path string, form url.Values) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint(path), strings.NewReader(form.Encode()))
 	if err != nil {

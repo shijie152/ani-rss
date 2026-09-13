@@ -35,10 +35,11 @@ func main() {
 	server := &http.Server{
 		Addr: *listenAddress,
 		Handler: gateway.New(gateway.Config{
-			UIDirectory: *uiDirectory,
-			JavaURL:     *javaURL,
-			GoRoutes:    app.Routes(),
-			GoDomains:   ownedDomains,
+			UIDirectory:     *uiDirectory,
+			ConfigDirectory: *configDirectory,
+			JavaURL:         *javaURL,
+			GoRoutes:        app.Routes(),
+			GoDomains:       ownedDomains,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,

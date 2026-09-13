@@ -23,17 +23,19 @@ type Route struct {
 
 // Config configures the migration gateway.
 type Config struct {
-	UIDirectory string
-	JavaURL     string
-	GoRoutes    []Route
-	GoDomains   []string
+	UIDirectory     string
+	ConfigDirectory string
+	JavaURL         string
+	GoRoutes        []Route
+	GoDomains       []string
 }
 
 // Gateway serves the existing UI and chooses between Go-owned and Java-owned
 // HTTP routes. SetGoRoutes is safe to call while requests are being served.
 type Gateway struct {
-	uiDirectory string
-	javaProxy   http.Handler
+	uiDirectory     string
+	configDirectory string
+	javaProxy       http.Handler
 
 	routesMu   sync.RWMutex
 	routes     map[string]route
@@ -51,8 +53,9 @@ type route struct {
 // UI-compatible 502 response.
 func New(config Config) *Gateway {
 	gateway := &Gateway{
-		uiDirectory: config.UIDirectory,
-		routes:      make(map[string]route),
+		uiDirectory:     config.UIDirectory,
+		configDirectory: config.ConfigDirectory,
+		routes:          make(map[string]route),
 	}
 	gateway.SetGoRoutes(config.GoRoutes)
 	if config.GoDomains != nil {
@@ -139,12 +142,19 @@ func (gateway *Gateway) goRoute(method, path string) http.Handler {
 }
 
 func (gateway *Gateway) serveUI(response http.ResponseWriter, request *http.Request) {
-	if gateway.uiDirectory == "" {
+	uiDirectory := gateway.uiDirectory
+	if gateway.configDirectory != "" {
+		custom := filepath.Join(gateway.configDirectory, "webui")
+		if isRegularFile(filepath.Join(custom, "index.html")) {
+			uiDirectory = custom
+		}
+	}
+	if uiDirectory == "" {
 		http.NotFound(response, request)
 		return
 	}
 
-	root, err := filepath.Abs(gateway.uiDirectory)
+	root, err := filepath.Abs(uiDirectory)
 	if err != nil {
 		http.Error(response, "UI directory is unavailable", http.StatusInternalServerError)
 		return
