@@ -40,6 +40,7 @@ type Service struct {
 	ResolvePath  PathResolver
 	ResolveOther func(model.Ani, string) (string, error)
 	Logger       *slog.Logger
+	Notify       func(context.Context, model.Ani, string, string) error
 }
 
 // Reader is the small part of config.Manager needed by the media service.
@@ -123,6 +124,12 @@ func (s *Service) Scrape(ctx context.Context, ani *model.Ani, force bool) (Resul
 		result.Errors = append(result.Errors, moveErr.Error())
 	} else if completedPath != "" {
 		result.Path = completedPath
+	}
+	if s.Notify != nil && result.Processed > 0 {
+		if notifyErr := s.Notify(ctx, *ani, result.Path, "DOWNLOAD_END"); notifyErr != nil {
+			result.Errors = append(result.Errors, "通知失败: "+notifyErr.Error())
+			return result, notifyErr
+		}
 	}
 	return result, nil
 }

@@ -60,6 +60,73 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	}
 }
 
+func TestNotificationAndEmbyRoutesPreserveUIContracts(t *testing.T) {
+	var updated atomic.Int32
+	var refreshed atomic.Int32
+	bgm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/Library/MediaFolders":
+			_, _ = io.WriteString(w, `{"Items":[{"Id":"library-1","Name":"Anime"}]}`)
+		case "/v0/episodes":
+			_, _ = io.WriteString(w, `{"data":[{"id":"episode-1","ep":1,"sort":1}]}`)
+		case "/v0/users/-/collections/-/episodes/episode-1":
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"type":0}`)
+			} else {
+				updated.Add(1)
+				_, _ = io.WriteString(w, `{"type":2}`)
+			}
+		case "/emby/Items/library-1/Refresh":
+			refreshed.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer bgm.Close()
+	dir := t.TempDir()
+	app, err := backend.New(backend.Options{ConfigDir: dir, OwnershipDomains: []string{"runtime", "subscriptions"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if err := app.Config().Update(model.Config{"bgmApi": bgm.URL, "bgmToken": "bgm-token"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	newConfig := callJSON(t, server.URL+"/api/newNotification", token, nil)
+	if newConfig["code"] != float64(http.StatusOK) || newConfig["data"] == nil {
+		t.Fatalf("new notification = %#v", newConfig)
+	}
+	added := callJSON(t, server.URL+"/api/addAni", token, model.Ani{ID: "demo", Title: "Demo", Season: 1, BGMURL: "https://bgm.tv/subject/42", URL: "https://example.test/rss", Enable: true})
+	if added["code"] != float64(http.StatusOK) {
+		t.Fatalf("add notification webhook subscription = %#v", added)
+	}
+	views := callJSON(t, server.URL+"/api/getEmbyViews", token, map[string]any{"embyHost": bgm.URL, "embyApiKey": "emby-token"})
+	if views["code"] != float64(http.StatusOK) || len(views["data"].([]any)) != 1 {
+		t.Fatalf("Emby views = %#v", views)
+	}
+	webhook := callJSON(t, server.URL+"/api/embyWebHook", token, map[string]any{"event": "item.markplayed", "Item": map[string]any{"SeriesName": "Demo", "FileName": "Demo S01E01.mkv"}})
+	if webhook["code"] != float64(http.StatusOK) {
+		t.Fatalf("Emby webhook = %#v", webhook)
+	}
+	// The webhook work is intentionally queued like Java's single-threaded
+	// executor; wait briefly for the BGM update before asserting the side effect.
+	deadline := time.Now().Add(time.Second)
+	for updated.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if updated.Load() != 1 {
+		t.Fatalf("matched subscription did not update BGM: %d", updated.Load())
+	}
+	if refreshed.Load() != 0 {
+		t.Fatalf("webhook unexpectedly refreshed Emby: %d", refreshed.Load())
+	}
+}
+
 func TestSubscriptionRoutesPersistThroughRestart(t *testing.T) {
 	dir := t.TempDir()
 	app, err := backend.New(backend.Options{ConfigDir: dir, OwnershipDomains: []string{"runtime", "subscriptions"}})

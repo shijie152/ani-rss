@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +31,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/media"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/notification"
 	"github.com/shijie152/ani-rss/go-backend/internal/ownership"
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
@@ -51,6 +54,7 @@ type App struct {
 	subscriptions *subscription.Service
 	configDir     string
 	logger        *slog.Logger
+	notifications *notification.Dispatcher
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
 	ownedDomains  []string
@@ -133,7 +137,7 @@ func New(options Options) (*App, error) {
 			ownedDomains = filtered
 		}
 	}
-	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, ownedDomains: ownedDomains, stateRequired: stateRequired}, nil
+	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired}, nil
 }
 
 func (a *App) Config() *appconfig.Manager { return a.config }
@@ -237,6 +241,11 @@ func (a *App) Routes() []gateway.Route {
 		runtime(http.MethodGet, "/api/custom.js", http.HandlerFunc(a.customJS)),
 		runtime(http.MethodGet, "/api/custom.css", http.HandlerFunc(a.customCSS)),
 		runtime(http.MethodPost, "/api/testProxy", a.protected(a.testProxy)),
+		runtime(http.MethodPost, "/api/testNotification", a.protected(a.testNotification)),
+		runtime(http.MethodPost, "/api/newNotification", a.protected(a.newNotification)),
+		runtime(http.MethodPost, "/api/getTgUpdates", a.protected(a.getTgUpdates)),
+		runtime(http.MethodPost, "/api/getEmbyViews", a.protected(a.getEmbyViews)),
+		runtime(http.MethodPost, "/api/embyWebHook", a.protected(a.embyWebHook)),
 		subscriptions(http.MethodPost, "/api/listAni", a.protected(a.listAni)),
 		subscriptions(http.MethodPost, "/api/addAni", a.protected(a.addAni)),
 		subscriptions(http.MethodPost, "/api/setAni", a.protected(a.setAni)),
@@ -722,7 +731,10 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter}, nil
+	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
+		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
+			return a.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
+		}}, nil
 }
 
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
@@ -874,6 +886,242 @@ func (a *App) downloadLoginTest(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, nil, "登录成功")
 }
 
+func (a *App) newNotification(w http.ResponseWriter, _ *http.Request) {
+	writeResult(w, http.StatusOK, notification.NewConfig(), "success")
+}
+
+func (a *App) testNotification(w http.ResponseWriter, r *http.Request) {
+	var cfg map[string]any
+	if err := decodeJSON(r, &cfg); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "通知配置格式异常: "+err.Error())
+		return
+	}
+	event := notification.Event{Ani: model.Ani{ID: "notification-test", Title: "ANI-RSS 测试", JPTitle: "テスト", Season: 1, Message: true, TMDB: map[string]any{"id": "292970"}}, Status: notification.DownloadStart, Text: "test"}
+	if err := a.notifications.Test(r.Context(), cfg, event); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	writeResult(w, http.StatusOK, nil, "测试成功")
+}
+
+func (a *App) getTgUpdates(w http.ResponseWriter, r *http.Request) {
+	var cfg map[string]any
+	if err := decodeJSON(r, &cfg); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	result, err := a.notifications.TelegramUpdates(r.Context(), cfg)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	writeResult(w, http.StatusOK, result, "success")
+}
+
+func (a *App) getEmbyViews(w http.ResponseWriter, r *http.Request) {
+	var cfg map[string]any
+	if err := decodeJSON(r, &cfg); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	host, token := strings.TrimRight(appconfig.String(cfg, "embyHost"), "/"), appconfig.String(cfg, "embyApiKey")
+	if host == "" || token == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "Emby 参数不完整")
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, host+"/Library/MediaFolders", nil)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	request.Header.Set("X-Emby-Token", token)
+	response, err := a.notifications.Client.Do(request)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeResult(w, http.StatusInternalServerError, nil, fmt.Sprintf("Emby HTTP %d", response.StatusCode))
+		return
+	}
+	var body struct {
+		Items []map[string]any `json:"Items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&body); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	writeResult(w, http.StatusOK, body.Items, "success")
+}
+
+func (a *App) embyWebHook(w http.ResponseWriter, r *http.Request) {
+	var payload map[string]any
+	if err := decodeJSON(r, &payload); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "Emby Webhook 格式异常: "+err.Error())
+		return
+	}
+	event := strings.ToLower(appconfig.String(payload, "event"))
+	if event == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "Emby Webhook 缺少 event")
+		return
+	}
+	if err := a.processEmbyWebhook(r.Context(), payload); err != nil {
+		// Java treats webhook processing as best-effort and returns success to
+		// Emby. Log the diagnostic while keeping the external webhook stable.
+		a.logger.Warn("Emby webhook processing failed", "error", err)
+	}
+	writeResult(w, http.StatusOK, nil, "success")
+}
+
+func (a *App) processEmbyWebhook(ctx context.Context, payload map[string]any) error {
+	cfg := a.config.Snapshot()
+	token := appconfig.String(cfg, "bgmToken")
+	if token == "" {
+		return nil
+	}
+	event := strings.ToLower(appconfig.String(payload, "event"))
+	if event == "system.webhooktest" || event == "system.notificationtest" {
+		return nil
+	}
+	item, _ := payload["Item"].(map[string]any)
+	if item == nil {
+		item, _ = payload["item"].(map[string]any)
+	}
+	fileName, seriesName := appconfig.String(item, "FileName"), appconfig.String(item, "SeriesName")
+	if fileName == "" {
+		fileName = appconfig.String(item, "fileName")
+	}
+	if seriesName == "" {
+		seriesName = appconfig.String(item, "seriesName")
+	}
+	match := regexp.MustCompile(`(?i)s(\d{1,3})[ ._-]*e(\d+(?:\.5)?)`).FindStringSubmatch(fileName)
+	if len(match) < 3 {
+		return nil
+	}
+	season, _ := strconv.Atoi(match[1])
+	episode, _ := strconv.ParseFloat(match[2], 64)
+	if season < 1 || episode != float64(int(episode)) {
+		return nil
+	}
+	playback, _ := payload["PlaybackInfo"].(map[string]any)
+	if playback == nil {
+		playback, _ = payload["playbackInfo"].(map[string]any)
+	}
+	status := -1
+	switch event {
+	case "item.markunplayed":
+		status = 0
+	case "item.markplayed":
+		status = 2
+	case "playback.stop":
+		if played, ok := playback["PlayedToCompletion"].(bool); ok && played {
+			status = 2
+		}
+		if played, ok := playback["playedToCompletion"].(bool); ok && played {
+			status = 2
+		}
+	}
+	if status < 0 {
+		return nil
+	}
+	var selected model.Ani
+	found := false
+	for _, candidate := range a.subscriptions.Items() {
+		if candidate.Season != season || candidate.BGMURL == "" {
+			continue
+		}
+		if candidate.Title == seriesName || candidate.TheMovieDBName == seriesName {
+			selected, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	subjectID := source.SubjectID(selected.BGMURL)
+	if subjectID == "" {
+		return nil
+	}
+	client := a.notifications.Client
+	base := strings.TrimRight(appconfig.String(cfg, "bgmApi"), "/")
+	if base == "" {
+		base = "https://api.bgm.tv"
+	}
+	form := url.Values{"subject_id": []string{subjectID}, "type": []string{"0"}, "limit": []string{"1000"}, "offset": []string{"0"}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v0/episodes", strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("Bangumi episodes HTTP %d", response.StatusCode)
+	}
+	var episodes struct {
+		Data []struct {
+			ID   string  `json:"id"`
+			Ep   float64 `json:"ep"`
+			Sort float64 `json:"sort"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&episodes); err != nil {
+		return err
+	}
+	episodeID := ""
+	for _, candidate := range episodes.Data {
+		if candidate.Ep == episode || candidate.Sort == episode {
+			episodeID = candidate.ID
+			if candidate.Ep == episode {
+				break
+			}
+		}
+	}
+	if episodeID == "" {
+		return nil
+	}
+	get, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/users/-/collections/-/episodes/"+url.PathEscape(episodeID), nil)
+	if err != nil {
+		return err
+	}
+	get.Header.Set("Authorization", "Bearer "+token)
+	currentResponse, err := client.Do(get)
+	if err != nil {
+		return err
+	}
+	defer currentResponse.Body.Close()
+	var current struct {
+		Type int `json:"type"`
+	}
+	if currentResponse.StatusCode >= 200 && currentResponse.StatusCode < 300 {
+		_ = json.NewDecoder(io.LimitReader(currentResponse.Body, 1<<20)).Decode(&current)
+	}
+	if current.Type == status {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]int{"type": status})
+	put, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/v0/users/-/collections/-/episodes/"+url.PathEscape(episodeID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	put.Header.Set("Authorization", "Bearer "+token)
+	put.Header.Set("Content-Type", "application/json")
+	updated, err := client.Do(put)
+	if err != nil {
+		return err
+	}
+	defer updated.Body.Close()
+	if updated.StatusCode < 200 || updated.StatusCode >= 300 {
+		return fmt.Errorf("Bangumi episode update HTTP %d", updated.StatusCode)
+	}
+	return nil
+}
+
 func (a *App) metadataClient() (*metadata.Client, error) {
 	cfg := a.config.Snapshot()
 	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
@@ -904,6 +1152,9 @@ func (a *App) mediaService() (*media.Service, error) {
 		return a.subscriptions.DownloadPathWithTemplate(item, template)
 	}
 	service.ConfigDir = a.configDir
+	service.Notify = func(ctx context.Context, item model.Ani, path, status string) error {
+		return a.notifications.Dispatch(ctx, notification.Event{Ani: item, Status: status, Text: "下载完成: " + item.Title, Path: path})
+	}
 	return service, nil
 }
 

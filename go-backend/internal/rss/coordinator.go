@@ -25,6 +25,7 @@ type Coordinator struct {
 	History       store.HistoryStore
 	HTTPClient    *http.Client
 	QB            downloader.Adapter
+	Notify        func(context.Context, model.Ani, *model.Resource, string, string) error
 	Retry         int
 	mu            sync.Mutex
 }
@@ -340,6 +341,11 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 				history = append(history, resource)
 				newResources = append(newResources, resource)
 				existing[key] = true
+				if c.Notify != nil {
+					if notifyErr := c.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
+						failures = append(failures, "通知失败: "+notifyErr.Error())
+					}
+				}
 				continue
 			}
 			failures = append(failures, resource.Title+": "+err.Error())
@@ -348,6 +354,11 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		history = append(history, resource)
 		newResources = append(newResources, resource)
 		existing[key] = true
+		if c.Notify != nil {
+			if notifyErr := c.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
+				failures = append(failures, "通知失败: "+notifyErr.Error())
+			}
+		}
 	}
 	if c.History != nil {
 		if err := c.History.SaveResources(history); err != nil {
