@@ -1,0 +1,52 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-backend/go.mod
+          cache-dependency-path: go-backend/go.sum
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: ani-rss-ui/pnpm-lock.yaml
+      - name: Build native Windows bundle
+        shell: pwsh
+        run: |
+          corepack enable
+          pnpm --dir ani-rss-ui install --frozen-lockfile
+          pnpm --dir ani-rss-ui build
+          New-Item -ItemType Directory -Force dist/windows/ui | Out-Null
+          $version = (Get-Content VERSION -First 1).Trim()
+          go build -tags gui -trimpath -ldflags "-s -w -X main.version=$version" -o dist/windows/ani-rss.exe ./go-backend/cmd/ani-rss
+          Copy-Item ani-rss-ui/dist/* dist/windows/ui -Recurse -Force
+          Copy-Item scripts/platform/windows/start-ani-rss.cmd, scripts/platform/windows/install-autostart.ps1, scripts/platform/windows/update-go-release.ps1 dist/windows -Force
+          Compress-Archive -Path dist/windows/* -DestinationPath "dist/ani-rss-windows-amd64.zip" -Force
+      - name: Smoke test native server
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'ani-rss-config'
+          New-Item -ItemType Directory -Force $config | Out-Null
+          $process = Start-Process -FilePath (Resolve-Path dist/windows/ani-rss.exe) -ArgumentList '--gui','--listen','127.0.0.1:17790','--ui-dir',(Resolve-Path dist/windows/ui),'--config-dir',$config -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\ani-rss.out" -RedirectStandardError "$env:RUNNER_TEMP\ani-rss.err"
+          try {
+            $ready = $false
+            1..20 | ForEach-Object {
+              if (-not $ready) {
+                try { Invoke-WebRequest http://127.0.0.1:17790/api/ping -UseBasicParsing | Out-Null; $ready = $true } catch { Start-Sleep -Seconds 1 }
+              }
+            }
+            if (-not $ready) { Get-Content "$env:RUNNER_TEMP\ani-rss.err"; throw 'ANI-RSS did not start' }
+          } finally { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ani-rss-windows-amd64
+          path: dist/ani-rss-windows-amd64.zip

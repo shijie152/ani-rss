@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -618,10 +620,52 @@ func icsEscape(value string) string {
 }
 
 func (a *App) about(w http.ResponseWriter, _ *http.Request) {
-	writeResult(w, http.StatusOK, map[string]any{"version": a.version, "latest": "", "update": false, "autoUpdate": false, "downloadUrl": "", "sha256": "", "size": int64(0), "formatSize": "0 MiB", "markdownBody": "", "date": nil}, "success")
+	data := map[string]any{"version": a.version, "latest": "", "update": false, "autoUpdate": false, "downloadUrl": "", "sha256": "", "size": int64(0), "formatSize": "0 MiB", "markdownBody": "", "date": nil}
+	if a.updater != nil {
+		if info, err := a.updater.Check(context.Background()); err == nil {
+			data["latest"], data["update"], data["autoUpdate"] = info.Version, info.Update, info.AutoUpdate
+			data["downloadUrl"], data["sha256"], data["size"] = info.URL, info.SHA256, info.Size
+			data["formatSize"], data["markdownBody"], data["date"] = info.FormatSize, info.Body, info.Date
+		} else {
+			a.logger.Warn("release check failed", "error", err)
+		}
+	}
+	writeResult(w, http.StatusOK, data, "success")
 }
-func (a *App) update(w http.ResponseWriter, _ *http.Request) {
-	writeResult(w, http.StatusOK, nil, "当前版本无需更新")
+func (a *App) update(w http.ResponseWriter, r *http.Request) {
+	if a.updater == nil {
+		writeResult(w, http.StatusOK, nil, "当前版本无需更新")
+		return
+	}
+	info, err := a.updater.Check(r.Context())
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "检测更新失败")
+		return
+	}
+	if !info.Update {
+		writeResult(w, http.StatusOK, nil, "当前版本无需更新")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.updater.Install(ctx, info); err != nil {
+			a.logger.Error("update failed", "error", err)
+			return
+		}
+		if runtime.GOOS == "windows" {
+			return
+		}
+		// Start the replaced binary after the HTTP response has been returned;
+		// the old process is then safe to terminate and the UI can reconnect.
+		time.Sleep(500 * time.Millisecond)
+		if executable, executableErr := os.Executable(); executableErr == nil {
+			if command := exec.Command(executable, os.Args[1:]...); command.Start() == nil {
+				os.Exit(0)
+			}
+		}
+	}()
+	writeResult(w, http.StatusOK, nil, "更新成功, 正在重启...")
 }
 func (a *App) stop(w http.ResponseWriter, r *http.Request) {
 	status, err := strconv.Atoi(r.URL.Query().Get("status"))
@@ -631,9 +675,16 @@ func (a *App) stop(w http.ResponseWriter, r *http.Request) {
 	}
 	if status == 0 {
 		writeResult(w, http.StatusOK, nil, "正在重启")
-		return
+	} else {
+		writeResult(w, http.StatusOK, nil, "正在关闭")
 	}
-	writeResult(w, http.StatusOK, nil, "正在关闭")
+	if a.shutdown != nil {
+		restart := status == 0
+		go func() {
+			time.Sleep(3 * time.Second)
+			a.shutdown(restart)
+		}()
+	}
 }
 
 func (a *App) webuiUpload(w http.ResponseWriter, r *http.Request) {

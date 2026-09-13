@@ -1,7 +1,13 @@
 #!/bin/sh
+set -eu
 
-chown -R ${PUID}:${PGID} /usr/app
+umask "${UMASK:-022}"
+config="${CONFIG:-/config}"
+mkdir -p "$config"
 
-umask ${UMASK}
+if [ "${PUID:-0}" != "0" ] || [ "${PGID:-0}" != "0" ]; then
+  chown -R "${PUID:-0}:${PGID:-0}" "$config"
+  exec su-exec "${PUID:-0}:${PGID:-0}" /run.sh
+fi
 
-exec su-exec ${PUID}:${PGID} /run.sh
+exec /run.sh

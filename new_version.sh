@@ -1,6 +1,6 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-# Maven 版本设置脚本
+# Go release version helper
 # 用法: ./new_version.sh <new_version>
 
 set -e  # 遇到错误立即退出
@@ -23,27 +23,7 @@ if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_-]+)?$ ]]; then
     exit 1
 fi
 
-# 检查当前目录是否存在 pom.xml
-if [ ! -f "pom.xml" ]; then
-    echo "错误: 当前目录未找到 pom.xml，请在 Maven 项目根目录执行此脚本"
-    exit 1
-fi
-
 echo "正在将项目版本设置为: $VERSION"
-
-# 执行版本设置命令
-if mvn versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=true; then
-    echo "版本设置成功，正在提交更改..."
-    
-    # 执行版本提交命令
-    if mvn versions:commit; then
-        echo "✅ 版本已成功更新为: $VERSION"
-    else
-        echo "❌ 版本提交失败，正在回退..."
-        mvn versions:revert
-        exit 1
-    fi
-else
-    echo "❌ 版本设置失败"
-    exit 1
-fi
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+printf '%s\n' "$VERSION" > "$SCRIPT_DIR/VERSION"
+echo "✅ Go 版本已更新为: $VERSION"

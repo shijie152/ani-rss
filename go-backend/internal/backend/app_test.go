@@ -20,7 +20,6 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/backend"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
-	"github.com/shijie152/ani-rss/go-backend/internal/ownership"
 )
 
 func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
@@ -351,80 +350,6 @@ func TestBackendRejectsDuplicatePersistedSubscriptions(t *testing.T) {
 	}
 	if _, err := backend.New(backend.Options{ConfigDir: dir}); err == nil || !strings.Contains(err.Error(), "标题和季度重复") {
 		t.Fatalf("duplicate startup data error = %v", err)
-	}
-}
-
-func TestDifferentialPingAgainstJavaWhenConfigured(t *testing.T) {
-	javaURL := strings.TrimRight(os.Getenv("ANI_RSS_JAVA_URL"), "/")
-	if javaURL == "" {
-		t.Skip("set ANI_RSS_JAVA_URL to run the Go/Java differential smoke test")
-	}
-	app, err := backend.New(backend.Options{ConfigDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer app.Close()
-	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes()}))
-	defer server.Close()
-	goResult := callJSON(t, server.URL+"/api/ping", "", nil)
-	javaResult := callJSON(t, javaURL+"/api/ping", "", nil)
-	for _, key := range []string{"code", "message"} {
-		if goResult[key] != javaResult[key] {
-			t.Fatalf("differential ping %s: Go=%#v Java=%#v", key, goResult[key], javaResult[key])
-		}
-	}
-	goToken := login(t, server.URL)
-	javaLogin := callJSON(t, javaURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})
-	if javaLogin["code"] != float64(http.StatusOK) {
-		t.Fatalf("Java login = %#v", javaLogin)
-	}
-	javaToken, ok := javaLogin["data"].(string)
-	if !ok || javaToken == "" {
-		t.Fatalf("Java login token = %#v", javaLogin)
-	}
-	goList := callJSON(t, server.URL+"/api/listAni", goToken, nil)
-	javaList := callJSON(t, javaURL+"/api/listAni", javaToken, nil)
-	compareListAni(t, goList, javaList)
-	goConfig := callJSON(t, server.URL+"/api/config", goToken, nil)
-	javaConfig := callJSON(t, javaURL+"/api/config", javaToken, nil)
-	compareStableConfig(t, goConfig, javaConfig)
-}
-
-func compareListAni(t *testing.T, left, right map[string]any) {
-	t.Helper()
-	if left["code"] != right["code"] || left["message"] != right["message"] {
-		t.Fatalf("listAni envelope differs: Go=%#v Java=%#v", left, right)
-	}
-	leftData, leftOK := left["data"].(map[string]any)
-	rightData, rightOK := right["data"].(map[string]any)
-	if !leftOK || !rightOK || leftData["total"] != rightData["total"] {
-		t.Fatalf("listAni total differs: Go=%#v Java=%#v", leftData, rightData)
-	}
-	leftWeeks, leftOK := leftData["weekList"].([]any)
-	rightWeeks, rightOK := rightData["weekList"].([]any)
-	if !leftOK || !rightOK || len(leftWeeks) != len(rightWeeks) {
-		t.Fatalf("listAni week count differs: Go=%#v Java=%#v", leftData, rightData)
-	}
-	for index := range leftWeeks {
-		leftWeek := leftWeeks[index].(map[string]any)
-		rightWeek := rightWeeks[index].(map[string]any)
-		if leftWeek["weekLabel"] != rightWeek["weekLabel"] || len(leftWeek["items"].([]any)) != len(rightWeek["items"].([]any)) {
-			t.Fatalf("listAni week %d differs: Go=%#v Java=%#v", index, leftWeek, rightWeek)
-		}
-	}
-}
-
-func compareStableConfig(t *testing.T, left, right map[string]any) {
-	t.Helper()
-	leftData, leftOK := left["data"].(map[string]any)
-	rightData, rightOK := right["data"].(map[string]any)
-	if !leftOK || !rightOK {
-		t.Fatalf("config data missing: Go=%#v Java=%#v", left, right)
-	}
-	for _, key := range []string{"downloadToolType", "rssTimeout", "sortType", "tmdb"} {
-		if leftData[key] != rightData[key] {
-			t.Fatalf("config %s differs: Go=%#v Java=%#v", key, leftData[key], rightData[key])
-		}
 	}
 }
 
@@ -905,43 +830,6 @@ func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
 	if added.Load() != 1 {
 		t.Fatalf("scheduled add count = %d", added.Load())
 	}
-}
-
-func TestStateOwnershipFallsBackToJavaForWriteRoutes(t *testing.T) {
-	dir := t.TempDir()
-	javaOwner, err := ownership.NewManager(filepath.Join(dir, "locks"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := javaOwner.Acquire("state", "java"); err != nil {
-		t.Fatal(err)
-	}
-	defer javaOwner.Close()
-
-	app, err := backend.New(backend.Options{ConfigDir: dir, OwnershipDomains: []string{"state", "runtime", "subscriptions", "sources", "rss", "media"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer app.Close()
-	owned := app.OwnedDomains()
-	for _, domain := range []string{"runtime", "subscriptions", "rss", "media"} {
-		for _, actual := range owned {
-			if actual == domain {
-				t.Fatalf("state-conflicting domain %q remained Go-owned: %v", domain, owned)
-			}
-		}
-	}
-	if len(owned) != 1 || owned[0] != "sources" {
-		t.Fatalf("read-only fallback domains = %v", owned)
-	}
-	javaFallback, err := ownership.NewManager(filepath.Join(dir, "locks"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := javaFallback.Acquire("rss", "java"); err != nil {
-		t.Fatalf("Go retained RSS lock after state conflict: %v", err)
-	}
-	javaFallback.Close()
 }
 
 func login(t *testing.T, baseURL string) string {

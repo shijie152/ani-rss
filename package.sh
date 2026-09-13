@@ -1,18 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 定义颜色代码
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-mvn -B package \
-    -DskipTests \
-    -P windows,macos \
-    --file pom.xml
-
-if [ $? -eq 1 ]; then
-  echo -e "${RED}jar编译失败${NC}"
-  exit 1
-fi
-
-echo -e "${GREEN}jar编译完成${NC}"
+# Build the UI unchanged and produce Go-only release bundles. The script is
+# intentionally usable on Linux/macOS CI runners; cross compilation happens
+# in Go and packaging that needs native platform tools is left to that runner.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${ROOT_DIR}/scripts/build-go-release.sh" "$@"

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+CONFIG="${ANI_RSS_CONFIG:-${HOME}/Library/Application Support/ani-rss}"
+PORT="${ANI_RSS_PORT:-7789}"
+LISTEN="${ANI_RSS_LISTEN:-127.0.0.1:${PORT}}"
+mkdir -p "$CONFIG"
+"${APP_ROOT}/Contents/MacOS/ani-rss-server" --gui --listen "$LISTEN" --ui-dir "${APP_ROOT}/Contents/Resources/ui" --config-dir "$CONFIG" &
+pid=$!
+if command -v open >/dev/null 2>&1; then
+  (sleep 1; open "http://127.0.0.1:${PORT}/") >/dev/null 2>&1 &
+fi
+trap 'kill "$pid" 2>/dev/null || true' INT TERM EXIT
+wait "$pid"

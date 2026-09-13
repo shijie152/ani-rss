@@ -35,7 +35,7 @@ func DefaultConfig() Config {
 		"configBackup": false, "configBackupDay": 7, "completed": false, "notificationConfigList": []any{}, "copyMasterToStandby": false, "sortType": "SCORE", "proxyList": "mikanani.me\nmikanime.tv\nanibt.net\nanimes.garden\nnyaa.si\ntmdb.org\nthemoviedb.org\nbgm.tv\nbangumi.tv\ngithub.com\nraw.githubusercontent.com", "scrape": false, "followDay": 14, "bangumiIniEnabled": false, "replace": false, "maxFileNameLength": 0, "limitLoginAttempts": true,
 		"reverseProxyTrustIpListEnabled": false, "reverseProxyTrustIpList": []any{"127.0.0.1"}, "subtitleIndependentFolderEnabled": false, "subtitleIndependentFolderName": "Subs", "bgmApi": "https://api.bgm.tv", "autoStart": false, "allowCors": false, "uuid": newID(), "jwtKey": base64.StdEncoding.EncodeToString(key), "tokenId": newID(),
 		"gitInfo":          map[string]any{"branch": "", "shortCommitId": "", "commitId": ""},
-		"runtimeOwnership": map[string]any{"rss": "java", "rename": "java", "maintenance": "java"},
+		"runtimeOwnership": map[string]any{"rss": "go", "rename": "go", "maintenance": "go"},
 	}
 }
 

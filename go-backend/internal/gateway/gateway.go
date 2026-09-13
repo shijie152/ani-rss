@@ -1,11 +1,9 @@
-// Package gateway owns the public HTTP entry point during the Java-to-Go migration.
+// Package gateway owns the public HTTP entry point for the Go service.
 package gateway
 
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +11,7 @@ import (
 	"time"
 )
 
-// Route is a Go-owned public route. Routes not in this table are sent to Java.
+// Route is a public route served by the Go service.
 type Route struct {
 	Domain  string
 	Method  string
@@ -25,22 +23,19 @@ type Route struct {
 type Config struct {
 	UIDirectory     string
 	ConfigDirectory string
-	JavaURL         string
 	GoRoutes        []Route
 	GoDomains       []string
 }
 
-// Gateway serves the existing UI and chooses between Go-owned and Java-owned
-// HTTP routes. SetGoRoutes is safe to call while requests are being served.
+// Gateway serves the existing UI and dispatches API routes to the Go backend.
+// SetGoRoutes is safe to call while requests are being served.
 type Gateway struct {
 	uiDirectory     string
 	configDirectory string
-	javaProxy       http.Handler
-
-	routesMu   sync.RWMutex
-	routes     map[string]route
-	domains    map[string]struct{}
-	domainsSet bool
+	routesMu        sync.RWMutex
+	routes          map[string]route
+	domains         map[string]struct{}
+	domainsSet      bool
 }
 
 type route struct {
@@ -48,9 +43,8 @@ type route struct {
 	handler http.Handler
 }
 
-// New creates a Gateway. An empty JavaURL is allowed so the gateway can be
-// used while no fallback backend is configured; API requests then receive a
-// UI-compatible 502 response.
+// New creates a Go-only gateway. API paths not registered in Go return a
+// UI-compatible 404 response; no secondary runtime is contacted.
 func New(config Config) *Gateway {
 	gateway := &Gateway{
 		uiDirectory:     config.UIDirectory,
@@ -62,15 +56,6 @@ func New(config Config) *Gateway {
 		gateway.SetGoDomains(config.GoDomains)
 	}
 
-	if config.JavaURL != "" {
-		if target, err := url.Parse(config.JavaURL); err == nil && isHTTPURL(target) {
-			gateway.javaProxy = newJavaProxy(target)
-		} else {
-			gateway.javaProxy = unavailableBackend("invalid Java backend URL")
-		}
-	} else {
-		gateway.javaProxy = unavailableBackend("Java backend is not configured")
-	}
 	return gateway
 }
 
@@ -95,7 +80,8 @@ func (gateway *Gateway) SetGoRoutes(routes []Route) {
 }
 
 // SetGoDomains atomically changes which business domains are owned by Go.
-// Passing nil disables all registered routes and restores the Java fallback.
+// Passing nil disables all registered routes. This is useful for testing and
+// for an operator-controlled domain maintenance window.
 // A Gateway created without GoDomains keeps all registered routes active,
 // which is convenient for a single-runtime deployment.
 func (gateway *Gateway) SetGoDomains(domains []string) {
@@ -112,16 +98,15 @@ func (gateway *Gateway) SetGoDomains(domains []string) {
 	gateway.routesMu.Unlock()
 }
 
-// ServeHTTP is the public seam for the Gateway. API requests are dispatched
-// to Go when owned, and otherwise forwarded to Java. All other requests are
-// served from the configured UI directory with SPA fallback.
+// ServeHTTP is the public seam for the Go service. API requests are dispatched
+// to a registered Go handler; all other requests are served from the UI.
 func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if isAPIRequest(request.URL.Path) {
 		if handler := gateway.goRoute(request.Method, request.URL.Path); handler != nil {
 			handler.ServeHTTP(response, request)
 			return
 		}
-		gateway.javaProxy.ServeHTTP(response, request)
+		writeGatewayError(response, http.StatusNotFound, "接口不存在")
 		return
 	}
 
@@ -176,20 +161,6 @@ func (gateway *Gateway) serveUI(response http.ResponseWriter, request *http.Requ
 	http.NotFound(response, request)
 }
 
-func newJavaProxy(target *url.URL) http.Handler {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ErrorHandler = func(response http.ResponseWriter, _ *http.Request, _ error) {
-		writeGatewayError(response, http.StatusBadGateway, "Java backend is unavailable")
-	}
-	return proxy
-}
-
-func unavailableBackend(message string) http.Handler {
-	return http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		writeGatewayError(response, http.StatusBadGateway, message)
-	})
-}
-
 func writeGatewayError(response http.ResponseWriter, status int, message string) {
 	response.Header().Set("Content-Type", "application/json; charset=utf-8")
 	response.WriteHeader(status)
@@ -215,10 +186,6 @@ func routeKey(method, path string) string {
 
 func acceptsHTML(request *http.Request) bool {
 	return strings.Contains(strings.ToLower(request.Header.Get("Accept")), "text/html")
-}
-
-func isHTTPURL(target *url.URL) bool {
-	return (target.Scheme == "http" || target.Scheme == "https") && target.Host != ""
 }
 
 func isRegularFile(path string) bool {

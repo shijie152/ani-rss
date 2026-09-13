@@ -130,6 +130,9 @@ func (m *Manager) Update(input model.Config) error {
 }
 
 func Normalize(cfg model.Config) error {
+	// Java is no longer a runtime option after the final cutover. Preserve the
+	// field for older UI/config exports, but make the active owner unambiguous.
+	cfg["runtimeOwnership"] = map[string]any{"rss": "go", "rename": "go", "maintenance": "go"}
 	for _, key := range []string{"mikanHost", "tmdbApi", "tmdbImage", "bgmApi", "downloadToolHost"} {
 		if value, ok := cfg[key].(string); ok {
 			normalized, err := normalizeURL(value)

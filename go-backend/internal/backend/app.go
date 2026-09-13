@@ -39,11 +39,14 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
+	"github.com/shijie152/ani-rss/go-backend/internal/update"
 )
 
 type Options struct {
 	ConfigDir        string
 	Version          string
+	UpdateEndpoint   string
+	Shutdown         func(bool)
 	Logger           *slog.Logger
 	OwnershipDomains []string
 	MCPEnabled       bool
@@ -64,11 +67,12 @@ type App struct {
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
 	ownedDomains  []string
-	stateRequired bool
 	version       string
 	logBuffer     *logBuffer
 	mcp           http.Handler
 	swagger       bool
+	updater       *update.Client
+	shutdown      func(bool)
 }
 
 func New(options Options) (*App, error) {
@@ -94,12 +98,8 @@ func New(options Options) (*App, error) {
 	ownedDomains := make([]string, 0, len(options.OwnershipDomains))
 	for _, domain := range options.OwnershipDomains {
 		if err := locks.Acquire(domain, "go"); err != nil {
-			if errors.Is(err, ownership.ErrAlreadyOwned) {
-				// A Java transition runtime may still own this domain. Keep the
-				// process alive and let the Gateway route that domain to Java.
-				continue
-			}
 			locks.Close()
+			_ = applicationStore.Close()
 			return nil, err
 		}
 		ownedDomains = append(ownedDomains, domain)
@@ -111,46 +111,17 @@ func New(options Options) (*App, error) {
 	} else {
 		logger = slog.New(&teeHandler{first: logs, second: logger.Handler()})
 	}
-	stateRequired := false
-	for _, domain := range options.OwnershipDomains {
-		if domain == "state" {
-			stateRequired = true
-			break
-		}
-	}
 	if options.Version != "" {
-		_, ownsState := locks.Owner("state")
-		if !stateRequired || ownsState {
-			if err := manager.Update(model.Config{"version": options.Version}); err != nil {
-				locks.Close()
-				return nil, err
-			}
+		if err := manager.Update(model.Config{"version": options.Version}); err != nil {
+			locks.Close()
+			_ = applicationStore.Close()
+			return nil, err
 		}
 	}
-	if stateRequired {
-		if _, owned := locks.Owner("state"); !owned {
-			// Do not retain write-capable domain locks after losing the shared
-			// state lock. Otherwise Java cannot acquire the domains that the
-			// Gateway is about to route back to it.
-			for _, domain := range append([]string(nil), ownedDomains...) {
-				switch domain {
-				case "runtime", "subscriptions", "rss", "media":
-					_ = locks.Release(domain)
-				}
-			}
-			filtered := ownedDomains[:0]
-			for _, domain := range ownedDomains {
-				switch domain {
-				case "runtime", "subscriptions", "rss", "media":
-					continue
-				default:
-					filtered = append(filtered, domain)
-				}
-			}
-			ownedDomains = filtered
-		}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	if strings.TrimSpace(options.UpdateEndpoint) != "" && options.Version != "" && options.Version != "dev" {
+		app.updater = &update.Client{Endpoint: options.UpdateEndpoint, Version: options.Version, Token: appconfig.String(manager.Snapshot(), "githubToken")}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired, swagger: options.SwaggerEnabled}
 	if options.MCPEnabled {
 		app.mcp = mcp.New(mcp.Config{Version: options.Version, Authorize: app.auth.APIKey, Tools: app.mcpTools()})
 	}
@@ -161,25 +132,9 @@ func (a *App) Config() *appconfig.Manager { return a.config }
 func (a *App) Store() store.Store         { return a.store }
 func (a *App) Auth() *auth.Authenticator  { return a.auth }
 
-// OwnedDomains returns only domains successfully claimed by this process.
-// Conflicting domains remain on the Java fallback during migration.
+// OwnedDomains returns the domains successfully claimed by this process.
 func (a *App) OwnedDomains() []string {
-	owned := append([]string(nil), a.ownedDomains...)
-	if a.stateRequired {
-		if _, ok := a.ownership.Owner("state"); !ok {
-			// Config, subscriptions, RSS and media processing can all mutate the
-			// shared JSON state. Keep only read-only source discovery available
-			// while Java remains the state writer.
-			filtered := owned[:0]
-			for _, domain := range owned {
-				if domain != "runtime" && domain != "subscriptions" && domain != "rss" && domain != "media" {
-					filtered = append(filtered, domain)
-				}
-			}
-			owned = filtered
-		}
-	}
-	return owned
+	return append([]string(nil), a.ownedDomains...)
 }
 
 // AcquireDomains must be called before starting Go schedulers. A caller may
@@ -206,18 +161,11 @@ func (a *App) Close() {
 	}
 }
 
-// RunSchedulers runs the scheduler domains owned by this Go process. During
-// the first migration slice RSS is the only periodic business task migrated;
-// rename and maintenance remain Java-owned until their own cutovers.
+// RunSchedulers runs the scheduler domains owned by this Go process.
 //
 // The method blocks until ctx is cancelled and is intended to run in one
 // goroutine from the command entrypoint.
 func (a *App) RunSchedulers(ctx context.Context) {
-	if a.stateRequired {
-		if _, owned := a.ownership.Owner("state"); !owned {
-			return
-		}
-	}
 	if _, owned := a.ownership.Owner("rss"); !owned {
 		return
 	}

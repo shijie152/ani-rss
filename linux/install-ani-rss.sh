@@ -1,5 +1,6 @@
-#!/bin/bash
-# ANI-RSS 一体化安装脚本 with Systemd 服务
+#!/usr/bin/env bash
+set -euo pipefail
+# ANI-RSS Go 一体化安装脚本 with Systemd 服务
 # 适用系统: Ubuntu/Debian/CentOS/RHEL
 
 # 定义颜色代码
@@ -13,31 +14,25 @@ INSTALL_DIR="/opt/ani-rss"
 SERVICE_USER="ani-rss"
 SERVICE_NAME="ani-rss.service"
 SERVER_PORT="7789"
+RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://github.com/wushuo894/ani-rss/releases}"
+ANI_RSS_VERSION="${ANI_RSS_VERSION:-}"
+ANI_RSS_VERSION="${ANI_RSS_VERSION#v}"
+
+detect_asset() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "linux-amd64" ;;
+        aarch64|arm64) echo "linux-arm64" ;;
+        armv7l|armv7|armhf) echo "linux-armv7" ;;
+        *)
+            echo -e "${RED}不支持的 CPU 架构: $(uname -m)${NC}" >&2
+            exit 1
+            ;;
+    esac
+}
 
 # 检查root权限
 check_root() {
     [ "$EUID" -ne 0 ] && echo -e "${RED}错误：请使用sudo或以root运行${NC}" && exit 1
-}
-
-# 安装JDK
-install_jdk() {
-    echo -e "${YELLOW}正在检查Java环境...${NC}"
-    if command -v java >/dev/null 2>&1; then
-        echo -e "${GREEN}检测到JDK已安装${NC}"
-        return
-    fi
-
-    echo -e "${YELLOW}正在安装OpenJDK 25...${NC}"
-    if command -v apt >/dev/null 2>&1; then
-        apt update -qq && apt install -y openjdk-25-jdk
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y java-25-openjdk-devel
-    else
-        echo -e "${RED}不支持的Linux发行版${NC}"
-        exit 1
-    fi
-
-    ! command -v java >/dev/null 2>&1 && echo -e "${RED}JDK安装失败${NC}" && exit 1
 }
 
 # 创建专用用户
@@ -56,23 +51,33 @@ create_user() {
 # 部署应用文件
 deploy_app() {
     echo -e "${YELLOW}正在部署应用程序...${NC}"
-    mkdir -p "$INSTALL_DIR" || exit 1
+    mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/ui"
 
-    echo "正在下载 ani-rss.jar"
-    # 下载jar包
-    if ! wget -q https://github.com/wushuo894/ani-rss/releases/latest/download/ani-rss.jar -O "$INSTALL_DIR/ani-rss.jar"; then
-        echo -e "${RED}下载 ani-rss.jar 失败${NC}"
+    local asset="${ANI_RSS_ASSET:-$(detect_asset)}"
+    local archive="ani-rss-${asset}.tar.gz"
+    local url
+    if [ -n "$ANI_RSS_VERSION" ]; then
+        url="${RELEASE_BASE_URL}/download/v${ANI_RSS_VERSION}/${archive}"
+    else
+        url="${RELEASE_BASE_URL}/latest/download/${archive}"
+    fi
+    local temp bundle
+    temp="$(mktemp -d)"
+    echo "正在下载 ${archive}"
+    if ! wget -q --show-progress "$url" -O "$temp/$archive"; then
+        echo -e "${RED}下载 ${archive} 失败${NC}"
         exit 1
     fi
-    echo "下载完成 ani-rss.jar"
-
-    echo "正在下载 run.sh"
-    # 下载启动脚本
-    if ! wget -q https://github.com/wushuo894/ani-rss/raw/master/docker/run.sh -O "$INSTALL_DIR/run.sh"; then
-        echo -e "${RED}下载启动脚本失败${NC}"
+    tar -xzf "$temp/$archive" -C "$temp"
+    bundle="$temp/ani-rss-${asset}"
+    if [ ! -x "$bundle/ani-rss" ] || [ ! -f "$bundle/ui/index.html" ]; then
+        echo -e "${RED}发布包内容不完整${NC}"
         exit 1
     fi
-    echo "下载完成 run.sh"
+    install -m 0755 "$bundle/ani-rss" "$INSTALL_DIR/ani-rss"
+    cp -a "$bundle/ui/." "$INSTALL_DIR/ui/"
+    rm -rf "$temp"
+    echo "Go 程序和 UI 部署完成"
 
     echo "正在下载 ani-rss.sh"
     # 下载管理脚本
@@ -82,12 +87,12 @@ deploy_app() {
     fi
     echo "下载完成 ani-rss.sh"
 
-    sudo chmod +x /usr/local/bin/ani-rss
+    chmod +x /usr/local/bin/ani-rss
 
     # 设置权限
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     chmod 750 "$INSTALL_DIR"
-    chmod 770 "$INSTALL_DIR/run.sh"
+    chmod 755 "$INSTALL_DIR/ani-rss"
     echo -e "${GREEN}程序部署完成${NC}"
 }
 
@@ -124,17 +129,17 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/bin/bash $INSTALL_DIR/run.sh
+ExecStart=$INSTALL_DIR/ani-rss --listen 0.0.0.0:$SERVER_PORT --ui-dir $INSTALL_DIR/ui --config-dir $INSTALL_DIR/config
 Restart=on-failure
 RestartSec=30
 LimitNOFILE=65535
 Environment="TZ=Asia/Shanghai"
-Environment="SERVER_ADDRESS=0.0.0.0"
-Environment="SERVER_PORT=$SERVER_PORT"
 Environment="CONFIG=$INSTALL_DIR/config"
+Environment="LISTEN_ADDR=0.0.0.0:$SERVER_PORT"
+Environment="UI_DIR=$INSTALL_DIR/ui"
+Environment="GO_DOMAINS=state,runtime,subscriptions,sources,rss,media,rename,maintenance"
 Environment="SWAGGER_ENABLED=false"
 Environment="MCP_ENABLED=false"
-Environment="JAVA_OPTS=-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC"
 
 [Install]
 WantedBy=multi-user.target
@@ -175,7 +180,6 @@ show_info() {
 # 主流程
 main() {
     check_root
-    install_jdk
     create_user
     deploy_app
     configure_port
