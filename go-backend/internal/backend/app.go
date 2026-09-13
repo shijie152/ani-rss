@@ -29,6 +29,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
 	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
+	"github.com/shijie152/ani-rss/go-backend/internal/mcp"
 	"github.com/shijie152/ani-rss/go-backend/internal/media"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
@@ -45,6 +46,8 @@ type Options struct {
 	Version          string
 	Logger           *slog.Logger
 	OwnershipDomains []string
+	MCPEnabled       bool
+	SwaggerEnabled   bool
 }
 
 type App struct {
@@ -62,6 +65,8 @@ type App struct {
 	stateRequired bool
 	version       string
 	logBuffer     *logBuffer
+	mcp           http.Handler
+	swagger       bool
 }
 
 func New(options Options) (*App, error) {
@@ -143,7 +148,11 @@ func New(options Options) (*App, error) {
 			ownedDomains = filtered
 		}
 	}
-	return &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired}, nil
+	app := &App{store: jsonStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(jsonStore, manager, items), configDir: jsonStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, jsonStore.Directory(), nil, logger), ownedDomains: ownedDomains, stateRequired: stateRequired, swagger: options.SwaggerEnabled}
+	if options.MCPEnabled {
+		app.mcp = mcp.New(mcp.Config{Version: options.Version, Authorize: app.auth.APIKey, Tools: app.mcpTools()})
+	}
+	return app, nil
 }
 
 func (a *App) Config() *appconfig.Manager { return a.config }
@@ -237,7 +246,7 @@ func (a *App) Routes() []gateway.Route {
 	subscriptions := func(method, path string, handler http.Handler) gateway.Route {
 		return gateway.Route{Domain: "subscriptions", Method: method, Path: path, Handler: handler}
 	}
-	return []gateway.Route{
+	routes := []gateway.Route{
 		runtime(http.MethodGet, "/api/ping", http.HandlerFunc(a.ping)),
 		runtime(http.MethodPost, "/api/ping", http.HandlerFunc(a.ping)),
 		runtime(http.MethodPost, "/api/login", http.HandlerFunc(a.login)),
@@ -307,6 +316,17 @@ func (a *App) Routes() []gateway.Route {
 		{Domain: "media", Method: http.MethodPost, Path: "/api/uploadAndRead", Handler: a.protected(a.uploadAndRead)},
 		{Domain: "media", Method: http.MethodPost, Path: "/api/uploadAndReadToBase64", Handler: a.protected(a.uploadAndReadBase64)},
 	}
+	if a.mcp != nil {
+		routes = append(routes, runtime(http.MethodPost, "/api/mcp", a.mcp))
+	}
+	if a.swagger {
+		routes = append(routes,
+			runtime(http.MethodGet, "/v3/api-docs", http.HandlerFunc(a.openapi)),
+			runtime(http.MethodGet, "/swagger-ui.html", http.HandlerFunc(a.swaggerRedirect)),
+			runtime(http.MethodGet, "/swagger-ui/index.html", http.HandlerFunc(a.swaggerUI)),
+		)
+	}
+	return routes
 }
 
 func (a *App) ping(w http.ResponseWriter, _ *http.Request) {

@@ -206,7 +206,7 @@ func writeGatewayError(response http.ResponseWriter, status int, message string)
 
 func isAPIRequest(path string) bool {
 	path = strings.ToLower(path)
-	return path == "/api" || strings.HasPrefix(path, "/api/")
+	return path == "/api" || strings.HasPrefix(path, "/api/") || path == "/v3/api-docs" || path == "/swagger-ui.html" || path == "/swagger-ui/index.html"
 }
 
 func routeKey(method, path string) string {

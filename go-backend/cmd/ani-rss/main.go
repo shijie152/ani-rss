@@ -21,10 +21,12 @@ func main() {
 	uiDirectory := flag.String("ui-dir", envOrDefault("UI_DIR", "ani-rss-ui/dist"), "directory containing the built Vue UI")
 	configDirectory := flag.String("config-dir", envOrDefault("CONFIG", "config"), "directory containing ANI-RSS JSON data")
 	goDomains := flag.String("go-domains", envOrDefault("GO_DOMAINS", "state,runtime,subscriptions,sources,rss,media"), "comma-separated business domains owned by Go")
+	mcpEnabled := flag.Bool("mcp-enabled", envBoolOrDefault("MCP_ENABLED", false), "enable the MCP streamable HTTP endpoint")
+	swaggerEnabled := flag.Bool("swagger-enabled", envBoolOrDefault("SWAGGER_ENABLED", false), "enable OpenAPI JSON and Swagger UI")
 	flag.Parse()
 
 	domains := splitDomains(*goDomains)
-	app, err := backend.New(backend.Options{ConfigDir: *configDirectory, OwnershipDomains: domains})
+	app, err := backend.New(backend.Options{ConfigDir: *configDirectory, OwnershipDomains: domains, MCPEnabled: *mcpEnabled, SwaggerEnabled: *swaggerEnabled})
 	if err != nil {
 		slog.Error("Go backend initialization failed", "error", err)
 		os.Exit(1)
@@ -86,4 +88,12 @@ func splitDomains(value string) []string {
 		}
 	}
 	return domains
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }

@@ -4,11 +4,13 @@
 
 **Blocked by:** 03: 订阅管理与 JSON 数据 Store；04: 资源源站发现与选择；05: RSS 刷新到 qBittorrent 下载主链路；06: 刮削、媒体整理与重命名；07: Transmission、Aria2 与 OpenList 下载器适配；08: 通知、Emby 与事件后处理；09: 合集、播放与媒体文件接口；10: 管理、备份、上传与外部 HTTP 接口
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] 当前 MCP endpoint 可被支持 streamable HTTP 的客户端建立连接
-- [ ] 当前 MCP 工具名称、输入结构、输出结构和错误行为保持可用
-- [ ] MCP 工具调用遵守与 UI/API 相同的认证和权限边界
-- [ ] Swagger UI 和 OpenAPI 文档能够描述 Go 实际提供的公开接口
-- [ ] 文档中的路径、方法、参数、请求体、响应体和鉴权信息与 HTTP contract tests 一致
-- [ ] MCP fake client 和 OpenAPI validation tests 能覆盖正常调用、无权限调用和外部服务失败
+- [x] 当前 MCP endpoint 可被支持 streamable HTTP 的客户端建立连接
+- [x] 当前 MCP 工具名称、输入结构、输出结构和错误行为保持可用
+- [x] MCP 工具调用遵守与 UI/API 相同的认证和权限边界
+- [x] Swagger UI 和 OpenAPI 文档能够描述 Go 实际提供的公开接口
+- [x] 文档中的路径、方法、参数、请求体、响应体和鉴权信息与 HTTP contract tests 一致
+- [x] MCP fake client 和 OpenAPI validation tests 能覆盖正常调用、无权限调用和外部服务失败
+
+实现说明：MCP 默认关闭，可通过 `MCP_ENABLED=true` 或 `-mcp-enabled` 启用；OpenAPI/Swagger 默认关闭，可通过 `SWAGGER_ENABLED=true` 或 `-swagger-enabled` 启用。MCP endpoint 为 `/api/mcp`，OpenAPI 为 `/v3/api-docs`，Swagger UI 为 `/swagger-ui/index.html`。
