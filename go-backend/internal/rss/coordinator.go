@@ -27,6 +27,7 @@ type Coordinator struct {
 	QB            downloader.Adapter
 	Notify        func(context.Context, model.Ani, *model.Resource, string, string) error
 	Retry         int
+	ConfigDir     string
 	mu            sync.Mutex
 }
 
@@ -138,7 +139,11 @@ func (c *Coordinator) PreviewResult(ctx context.Context, item model.Ani) (map[st
 	}
 	items := make([]model.Item, 0, len(resources))
 	for _, value := range resources {
-		items = append(items, model.Item{Title: value.Title, ReName: value.Title, Torrent: value.DownloadURL, InfoHash: value.InfoHash, Episode: value.Episode, FormatSize: value.FormatSize, Length: value.Size, HasDownloaded: historyKeys[resourceKey(value)], Master: value.Master, Subgroup: value.Subgroup, PubDate: value.PublishedAt, Source: value.Source, Description: value.Description})
+		cached := historyKeys[resourceKey(value)]
+		if c.ConfigDir != "" {
+			cached = cached || HasCachedResource(c.ConfigDir, item, value)
+		}
+		items = append(items, model.Item{Title: value.Title, ReName: value.Title, Torrent: value.DownloadURL, InfoHash: value.InfoHash, Episode: value.Episode, FormatSize: value.FormatSize, Length: value.Size, HasDownloaded: cached, Master: value.Master, Subgroup: value.Subgroup, PubDate: value.PublishedAt, Source: value.Source, Description: value.Description})
 	}
 	return map[string]any{"downloadPath": pathData["downloadPath"], "items": items, "omitList": omitEpisodes(items)}, err
 }
@@ -229,6 +234,7 @@ func (c *Coordinator) fetchFeed(ctx context.Context, item model.Ani, feedURL, su
 	resources = Match(resources, feedItem, options)
 	for index := range resources {
 		resources[index].Master = master
+		resources[index].AniID = item.ID
 	}
 	return resources, nil
 }
@@ -339,6 +345,11 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 			// failure so a retry does not submit the same resource twice.
 			if recovered, inventoryErr := c.QB.Torrents(ctx); inventoryErr == nil && containsResourceTask(recovered, resource) {
 				history = append(history, resource)
+				if c.ConfigDir != "" {
+					if cacheErr := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, ani, resource); cacheErr != nil {
+						failures = append(failures, resource.Title+": 缓存种子失败: "+cacheErr.Error())
+					}
+				}
 				newResources = append(newResources, resource)
 				existing[key] = true
 				if c.Notify != nil {
@@ -352,6 +363,11 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 			continue
 		}
 		history = append(history, resource)
+		if c.ConfigDir != "" {
+			if cacheErr := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, ani, resource); cacheErr != nil {
+				failures = append(failures, resource.Title+": 缓存种子失败: "+cacheErr.Error())
+			}
+		}
 		newResources = append(newResources, resource)
 		existing[key] = true
 		if c.Notify != nil {

@@ -34,6 +34,15 @@ type QBittorrent struct {
 	sessionCookie                    string
 }
 
+// TorrentFile is the subset of qBittorrent's file record required by the
+// collection workflow. Paths are torrent-relative, as required by the RPC.
+type TorrentFile struct {
+	Index    int    `json:"index"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Priority int    `json:"priority"`
+}
+
 func (q *QBittorrent) httpClient() *http.Client {
 	if q.Client != nil {
 		return q.Client
@@ -350,6 +359,36 @@ func (q *QBittorrent) SetSavePath(ctx context.Context, hash, path string) error 
 }
 func (q *QBittorrent) Start(ctx context.Context, hash string) error {
 	return q.postForm(ctx, "/api/v2/torrents/start", url.Values{"hashes": []string{hash}})
+}
+
+// Files returns the current file list for one torrent. It is deliberately a
+// qBittorrent capability rather than part of the cross-downloader Adapter:
+// collection renaming depends on qBittorrent's file-priority API.
+func (q *QBittorrent) Files(ctx context.Context, hash string) ([]TorrentFile, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/torrents/files?hash="+url.QueryEscape(hash)), nil)
+	if err != nil {
+		return nil, err
+	}
+	q.authorize(request)
+	response, err := q.httpClient().Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("qBittorrent files returned HTTP %d", response.StatusCode)
+	}
+	var files []TorrentFile
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&files); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (q *QBittorrent) SetFilePriority(ctx context.Context, hash string, index, priority int) error {
+	return q.postForm(ctx, "/api/v2/torrents/filePrio", url.Values{
+		"hash": []string{hash}, "id": []string{strconv.Itoa(index)}, "priority": []string{strconv.Itoa(priority)},
+	})
 }
 
 // UpdateTrackers is intentionally a no-op for the global qBittorrent

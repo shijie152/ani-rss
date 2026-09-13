@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/auth"
+	"github.com/shijie152/ani-rss/go-backend/internal/collection"
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
@@ -270,6 +271,9 @@ func (a *App) Routes() []gateway.Route {
 		{Domain: "rss", Method: http.MethodPost, Path: "/api/deleteTorrent", Handler: a.protected(a.deleteTorrent)},
 		{Domain: "rss", Method: http.MethodPost, Path: "/api/torrentsInfos", Handler: a.protected(a.torrentsInfos)},
 		{Domain: "rss", Method: http.MethodPost, Path: "/api/downloadLoginTest", Handler: a.protected(a.downloadLoginTest)},
+		{Domain: "media", Method: http.MethodPost, Path: "/api/startCollection", Handler: a.protected(a.startCollection)},
+		{Domain: "media", Method: http.MethodPost, Path: "/api/previewCollection", Handler: a.protected(a.previewCollection)},
+		{Domain: "media", Method: http.MethodPost, Path: "/api/getCollectionSubgroup", Handler: a.protected(a.getCollectionSubgroup)},
 		{Domain: "media", Method: http.MethodPost, Path: "/api/scrape", Handler: a.protected(a.scrape)},
 		{Domain: "media", Method: http.MethodPost, Path: "/api/batchScrape", Handler: a.protected(a.batchScrape)},
 		{Domain: "media", Method: http.MethodPost, Path: "/api/refreshCover", Handler: a.protected(a.refreshCover)},
@@ -731,7 +735,7 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
+	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.store, HTTPClient: client, ConfigDir: a.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
 		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
 			return a.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
 		}}, nil
@@ -825,6 +829,18 @@ func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "参数不能为空")
 		return
 	}
+	var selected model.Ani
+	found := false
+	for _, item := range a.subscriptions.Items() {
+		if item.ID == id {
+			selected, found = item, true
+			break
+		}
+	}
+	if !found {
+		writeResult(w, http.StatusInternalServerError, nil, "此订阅不存在")
+		return
+	}
 	hashes := map[string]bool{}
 	for _, value := range strings.Split(hash, ",") {
 		if value = strings.TrimSpace(value); value != "" {
@@ -838,12 +854,16 @@ func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 	kept := make([]model.Resource, 0, len(resources))
 	for _, value := range resources {
-		if hashes[strings.ToLower(value.InfoHash)] {
+		if value.AniID == id && hashes[strings.ToLower(value.InfoHash)] {
 			continue
 		}
 		kept = append(kept, value)
 	}
 	if err := a.store.SaveResources(kept); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	if err := rss.DeleteResourceCache(a.configDir, selected, hashes); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
@@ -884,6 +904,70 @@ func (a *App) downloadLoginTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeResult(w, http.StatusOK, nil, "登录成功")
+}
+
+func (a *App) collectionService() (*collection.Service, error) {
+	cfg := a.config.Snapshot()
+	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	adapter, err := downloader.New(cfg, client)
+	if err != nil {
+		return nil, err
+	}
+	qb, ok := adapter.(*downloader.QBittorrent)
+	if !ok {
+		return nil, errors.New("合集下载暂时只支持 qBittorrent")
+	}
+	return &collection.Service{Config: a.config, Download: qb}, nil
+}
+
+func (a *App) startCollection(w http.ResponseWriter, r *http.Request) {
+	var info model.CollectionInfo
+	if err := decodeJSON(r, &info); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "合集参数格式异常: "+err.Error())
+		return
+	}
+	service, err := a.collectionService()
+	if err == nil {
+		err = service.Start(r.Context(), info)
+	}
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
+		return
+	}
+	writeResult(w, http.StatusOK, nil, "已经开始下载合集")
+}
+
+func (a *App) previewCollection(w http.ResponseWriter, r *http.Request) {
+	var info model.CollectionInfo
+	if err := decodeJSON(r, &info); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "合集参数格式异常: "+err.Error())
+		return
+	}
+	service := &collection.Service{Config: a.config}
+	items, err := service.Preview(info)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
+		return
+	}
+	writeResult(w, http.StatusOK, items, "success")
+}
+
+func (a *App) getCollectionSubgroup(w http.ResponseWriter, r *http.Request) {
+	var info model.CollectionInfo
+	if err := decodeJSON(r, &info); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "合集参数格式异常: "+err.Error())
+		return
+	}
+	service := &collection.Service{Config: a.config}
+	subgroup, err := service.Subgroup(info)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
+		return
+	}
+	writeResult(w, http.StatusOK, subgroup, "success")
 }
 
 func (a *App) newNotification(w http.ResponseWriter, _ *http.Request) {
@@ -1457,6 +1541,10 @@ func (a *App) file(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	if strings.HasPrefix(contentType, "video/") {
 		w.Header().Set("Accept-Ranges", "bytes")
+	} else if info.Size() <= 3*1024*1024 {
+		// Match the Java file endpoint: small non-video assets are safe to cache
+		// for a month, while large assets remain uncached by default.
+		w.Header().Set("Cache-Control", "public, max-age=2592000")
 	}
 	file, openErr := os.Open(filename)
 	if openErr != nil {
@@ -1488,8 +1576,13 @@ func (a *App) allowedMediaPath(path string) bool {
 	if err != nil || !media.IsSupported(path) {
 		return false
 	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
 	filesRoot, filesErr := filepath.Abs(filepath.Join(a.configDir, "files"))
-	if filesErr == nil && isWithinPath(filesRoot, path) {
+	filesRoot, rootErr := filepath.EvalSymlinks(filesRoot)
+	if filesErr == nil && rootErr == nil && isWithinPath(filesRoot, canonical) {
 		return true
 	}
 	for _, item := range a.subscriptions.Items() {
@@ -1497,8 +1590,15 @@ func (a *App) allowedMediaPath(path string) bool {
 		if resolveErr != nil {
 			continue
 		}
-		root := resolved["downloadPath"].(string)
-		relative, relErr := filepath.Rel(root, path)
+		root, ok := resolved["downloadPath"].(string)
+		if !ok {
+			continue
+		}
+		root, rootErr = filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(root, canonical)
 		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return true
 		}

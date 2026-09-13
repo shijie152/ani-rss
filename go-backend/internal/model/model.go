@@ -133,6 +133,17 @@ type Item struct {
 	Description   string     `json:"description,omitempty"`
 }
 
+// CollectionInfo is the request shape used by the existing collection dialog.
+// Filename and BGMInfo are retained even though the backend only needs the
+// base64 torrent and subscription; the UI sends both fields as part of its
+// form state.
+type CollectionInfo struct {
+	Filename string         `json:"filename,omitempty"`
+	Torrent  string         `json:"torrent"`
+	Ani      Ani            `json:"ani"`
+	BGMInfo  map[string]any `json:"bgmInfo,omitempty"`
+}
+
 type ListAni struct {
 	ReleaseDateList []string  `json:"releaseDateList"`
 	WeekList        []WeekAni `json:"weekList"`
@@ -163,6 +174,7 @@ type Torrent struct {
 }
 
 type Resource struct {
+	AniID       string     `json:"aniId,omitempty"`
 	Title       string     `json:"title"`
 	Episode     float64    `json:"episode"`
 	Size        int64      `json:"size"`

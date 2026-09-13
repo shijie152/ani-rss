@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -652,6 +654,185 @@ func TestHTTPMediaRejectsMissingMetadataAndFileTraversal(t *testing.T) {
 	if missing["code"] != float64(http.StatusInternalServerError) || missing["message"] == "" {
 		t.Fatalf("missing metadata response = %#v", missing)
 	}
+}
+
+func TestCollectionRoutesAndMediaStreamingAreUICompatible(t *testing.T) {
+	var renamed atomic.Int32
+	var reprioritized atomic.Int32
+	var started atomic.Int32
+	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/app/version":
+			_, _ = io.WriteString(w, "v4")
+		case "/api/v2/torrents/add":
+			if err := r.ParseMultipartForm(4 << 20); err != nil {
+				t.Errorf("collection multipart = %v", err)
+			}
+			if r.FormValue("paused") != "true" || r.FormValue("rename") == "" {
+				t.Errorf("collection add fields = %#v", r.MultipartForm.Value)
+			}
+			_, _ = io.WriteString(w, "Ok")
+		case "/api/v2/torrents/files":
+			_, _ = io.WriteString(w, `[{"index":0,"name":"Demo Collection/[Group] Demo E01.mkv","size":100,"priority":1},{"index":1,"name":"Demo Collection/[Group] Demo E01.chs.ass","size":20,"priority":1},{"index":2,"name":"Demo Collection/Extras.txt","size":5,"priority":1}]`)
+		case "/api/v2/torrents/renameFile":
+			renamed.Add(1)
+		case "/api/v2/torrents/filePrio":
+			reprioritized.Add(1)
+		case "/api/v2/torrents/start":
+			started.Add(1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer qb.Close()
+
+	root := t.TempDir()
+	app, err := backend.New(backend.Options{ConfigDir: root, OwnershipDomains: []string{"runtime", "subscriptions", "media"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "media"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"downloadToolHost": qb.URL, "downloadToolPassword": "api-key"}); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("set downloader config = %#v", response)
+	}
+	info := map[string]any{"filename": "collection.torrent", "torrent": base64.StdEncoding.EncodeToString(testCollectionTorrent()), "ani": model.Ani{Title: "Demo", Season: 1, Subgroup: "Group", Offset: 1, CustomDownloadPathTemplate: filepath.Join(root, "media")}}
+	preview := callJSON(t, server.URL+"/api/previewCollection", token, info)
+	if preview["code"] != float64(http.StatusOK) || len(preview["data"].([]any)) != 2 {
+		t.Fatalf("collection preview = %#v", preview)
+	}
+	group := callJSON(t, server.URL+"/api/getCollectionSubgroup", token, info)
+	if group["code"] != float64(http.StatusOK) || group["data"] != "Group" {
+		t.Fatalf("collection subgroup = %#v", group)
+	}
+	startedResponse := callJSON(t, server.URL+"/api/startCollection", token, info)
+	if startedResponse["code"] != float64(http.StatusOK) || renamed.Load() != 2 || reprioritized.Load() != 1 || started.Load() != 1 {
+		t.Fatalf("collection start=%#v rename=%d priority=%d start=%d", startedResponse, renamed.Load(), reprioritized.Load(), started.Load())
+	}
+
+	mediaDir := filepath.Join(root, "library")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	video := filepath.Join(mediaDir, "Demo S01E01.mkv")
+	if err := os.WriteFile(video, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "Demo S01E01.chs.ass"), []byte("subtitle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	image := filepath.Join(root, "files", "cover.png")
+	if err := os.MkdirAll(filepath.Dir(image), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.mkv")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(mediaDir, "linked.mkv")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(mediaDir, "notes.txt")
+	if err := os.WriteFile(invalid, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "media", Title: "Media", URL: "https://example.test/media", Season: 1, CustomDownloadPath: true, CustomDownloadPathTemplate: mediaDir}
+	if response := callJSON(t, server.URL+"/api/addAni", token, item); response["code"] != float64(http.StatusOK) {
+		t.Fatalf("add media root = %#v", response)
+	}
+	rangeResponse := getWithHeader(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte(video)), token, "Range", "bytes=2-5")
+	rangeBody, _ := io.ReadAll(rangeResponse.Body)
+	rangeResponse.Body.Close()
+	if rangeResponse.StatusCode != http.StatusPartialContent || string(rangeBody) != "2345" || rangeResponse.Header.Get("Content-Range") != "bytes 2-5/10" || rangeResponse.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("range response status=%d headers=%v body=%q", rangeResponse.StatusCode, rangeResponse.Header, rangeBody)
+	}
+	subtitles := callJSON(t, server.URL+"/api/getSubtitles?filename="+base64.RawStdEncoding.EncodeToString([]byte(video)), token, nil)
+	if subtitles["code"] != float64(http.StatusOK) || len(subtitles["data"].([]any)) != 1 {
+		t.Fatalf("subtitle response = %#v", subtitles)
+	}
+	imageResponse := get(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte("cover.png")), token)
+	imageResponse.Body.Close()
+	if imageResponse.StatusCode != http.StatusOK || imageResponse.Header.Get("Cache-Control") != "public, max-age=2592000" || !strings.HasPrefix(imageResponse.Header.Get("Content-Type"), "image/png") {
+		t.Fatalf("image response status=%d headers=%v", imageResponse.StatusCode, imageResponse.Header)
+	}
+	unauthorized := get(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte(video)), "")
+	var unauthorizedPayload map[string]any
+	if err := json.NewDecoder(unauthorized.Body).Decode(&unauthorizedPayload); err != nil {
+		unauthorized.Body.Close()
+		t.Fatal(err)
+	}
+	unauthorized.Body.Close()
+	if unauthorizedPayload["code"] != float64(http.StatusForbidden) {
+		t.Fatalf("unauthorized media response = %#v", unauthorizedPayload)
+	}
+	for _, filename := range []string{"linked.mkv", "notes.txt"} {
+		response := get(t, server.URL+"/api/file?filename="+base64.RawStdEncoding.EncodeToString([]byte(filepath.Join(mediaDir, filename))), token)
+		var payload map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			response.Body.Close()
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if payload["code"] != float64(http.StatusForbidden) {
+			t.Fatalf("unsafe/illegal media %s response = %#v", filename, payload)
+		}
+	}
+}
+
+func getWithHeader(t *testing.T, target, token, key, value string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", token)
+	request.Header.Set(key, value)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func testCollectionTorrent() []byte {
+	info := testBDict(map[string][]byte{
+		"files": testBList(
+			testBDict(map[string][]byte{"length": testBInt(100), "path": testBList(testBString("[Group] Demo E01.mkv"))}),
+			testBDict(map[string][]byte{"length": testBInt(20), "path": testBList(testBString("[Group] Demo E01.chs.ass"))}),
+			testBDict(map[string][]byte{"length": testBInt(5), "path": testBList(testBString("Extras.txt"))}),
+		),
+		"name": testBString("Demo Collection"),
+	})
+	return testBDict(map[string][]byte{"info": info})
+}
+
+func testBString(value string) []byte { return []byte(strconv.Itoa(len(value)) + ":" + value) }
+func testBInt(value int64) []byte     { return []byte("i" + strconv.FormatInt(value, 10) + "e") }
+func testBList(values ...[]byte) []byte {
+	result := []byte("l")
+	for _, value := range values {
+		result = append(result, value...)
+	}
+	return append(result, 'e')
+}
+func testBDict(values map[string][]byte) []byte {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := []byte("d")
+	for _, key := range keys {
+		result = append(result, testBString(key)...)
+		result = append(result, values[key]...)
+	}
+	return append(result, 'e')
 }
 
 func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {

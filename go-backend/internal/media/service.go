@@ -197,6 +197,23 @@ func (s *Service) PlaybackList(path string) ([]model.MediaFile, error) {
 	return result, nil
 }
 
+// EpisodeForName exposes the same episode extraction used by media scraping
+// to the collection preview, which must produce identical filenames.
+func EpisodeForName(name string, ani model.Ani) (float64, bool) {
+	identity := parseIdentityFor(filepath.Base(name), ani)
+	return identity.Episode, identity.HasEp
+}
+
+// CollectionFilename applies the normal media rename template to a torrent
+// member. The collection workflow supplies the already offset-adjusted
+// episode number because the legacy Java workflow applies Ani.offset there.
+func CollectionFilename(ani model.Ani, original string, episode float64, config appconfig.Reader) string {
+	if ani.OVA {
+		return sanitizeName(ani.Title)
+	}
+	return buildFilename(ani, model.Metadata{}, filepath.Base(original), mediaIdentity{Episode: episode, HasEp: true}, config)
+}
+
 // SubtitlesFor exposes the sidecar matching rule used by both the playlist
 // response and the file player endpoint.
 func SubtitlesFor(videoPath string) []model.SubtitleInfo { return subtitlesFor(videoPath) }
