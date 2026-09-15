@@ -9,6 +9,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -366,12 +369,13 @@ func IsSupported(name string) bool {
 
 func (s *Service) RefreshCover(ctx context.Context, imageURL string, override bool) (string, error) {
 	imageURL = strings.TrimSpace(imageURL)
+	defaultPath, defaultErr := s.ensureDefaultCover()
 	if imageURL == "" {
-		return "cover.png", nil
+		return defaultPath, defaultErr
 	}
 	parsed, err := url.Parse(imageURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return "", errors.New("图片地址格式异常")
+		return defaultPath, defaultErr
 	}
 	configDir := s.ConfigDir
 	if configDir == "" {
@@ -379,7 +383,7 @@ func (s *Service) RefreshCover(ctx context.Context, imageURL string, override bo
 	}
 	filesDir := filepath.Join(configDir, "files")
 	if err := os.MkdirAll(filesDir, 0o755); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(imageURL)))
 	ext := strings.ToLower(filepath.Ext(parsed.Path))
@@ -396,18 +400,18 @@ func (s *Service) RefreshCover(ctx context.Context, imageURL string, override bo
 	}
 	response, err := s.HTTPClient.Get(imageURL)
 	if err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("图片服务返回 HTTP %d", response.StatusCode)
+		return defaultPath, defaultErr
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	temp, err := os.CreateTemp(filepath.Dir(target), ".cover-*.tmp")
 	if err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	tempName := temp.Name()
 	ok := false
@@ -418,19 +422,71 @@ func (s *Service) RefreshCover(ctx context.Context, imageURL string, override bo
 		}
 	}()
 	if _, err := io.Copy(temp, io.LimitReader(response.Body, 16<<20)); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	if err := temp.Sync(); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	if err := temp.Close(); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	if err := os.Rename(tempName, target); err != nil {
-		return "", err
+		return defaultPath, defaultErr
 	}
 	ok = true
 	return relative, nil
+}
+
+// ensureDefaultCover mirrors Java's saveCover fallback. The exact artwork is
+// intentionally generated locally so a fresh Go installation does not need
+// a Java classpath resource just to render an empty/failed cover.
+func (s *Service) ensureDefaultCover() (string, error) {
+	configDir := s.ConfigDir
+	if configDir == "" {
+		configDir = "config"
+	}
+	target := filepath.Join(configDir, "files", "cover.png")
+	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
+		return "cover.png", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return "cover.png", err
+	}
+	// A compact neutral poster keeps the same 400x566 portrait geometry as
+	// the legacy placeholder while avoiding a missing-image icon in the UI.
+	imageValue := image.NewRGBA(image.Rect(0, 0, 400, 566))
+	for y := 0; y < 566; y++ {
+		shade := uint8(224 - (y * 28 / 565))
+		for x := 0; x < 400; x++ {
+			imageValue.SetRGBA(x, y, color.RGBA{R: shade, G: shade, B: shade, A: 255})
+		}
+	}
+	temp, err := os.CreateTemp(filepath.Dir(target), ".cover-default-*.tmp")
+	if err != nil {
+		return "cover.png", err
+	}
+	tempName := temp.Name()
+	ok := false
+	defer func() {
+		_ = temp.Close()
+		if !ok {
+			_ = os.Remove(tempName)
+		}
+	}()
+	if err := png.Encode(temp, imageValue); err != nil {
+		return "cover.png", err
+	}
+	if err := temp.Close(); err != nil {
+		return "cover.png", err
+	}
+	if err := os.Rename(tempName, target); err != nil {
+		if info, statErr := os.Stat(target); statErr == nil && info.Mode().IsRegular() {
+			return "cover.png", nil
+		}
+		return "cover.png", err
+	}
+	ok = true
+	return "cover.png", nil
 }
 
 func (s *Service) processDirectory(path string, ani model.Ani, metadataValue model.Metadata, force bool) (int, []string) {
@@ -731,7 +787,10 @@ func subtitlesFor(videoPath string) []model.SubtitleInfo {
 	result := []model.SubtitleInfo{}
 	seen := map[string]bool{}
 	for _, entry := range entries {
-		if entry.IsDir() || !isSubtitle(entry.Name()) {
+		// The legacy PlayController deliberately exposes only browser-playable
+		// ASS/SRT sidecars. Other subtitle formats remain supported for media
+		// processing and file access, but must not be offered to Artplayer.
+		if entry.IsDir() || !isPlayableSidecar(entry.Name()) {
 			continue
 		}
 		candidateStem := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
@@ -777,6 +836,9 @@ func isVideo(name string) bool {
 }
 func isSubtitle(name string) bool {
 	return hasExt(name, map[string]bool{"ass": true, "ssa": true, "sub": true, "srt": true, "lyc": true, "sup": true, "pgs": true, "mks": true})
+}
+func isPlayableSidecar(name string) bool {
+	return hasExt(name, map[string]bool{"ass": true, "srt": true})
 }
 func hasExt(name string, values map[string]bool) bool {
 	return values[strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))]

@@ -29,14 +29,50 @@ var (
 )
 
 type Service struct {
-	store  store.Store
-	config *appconfig.Manager
-	mu     sync.RWMutex
-	items  []model.Ani
+	store              store.Store
+	config             *appconfig.Manager
+	mu                 sync.RWMutex
+	items              []model.Ani
+	taskManagerFactory TaskManagerFactory
+	background         func(func())
+	onAdd              func(model.Ani)
+	configDir          string
 }
+
+// TaskManager is the narrow downloader surface needed by subscription
+// lifecycle side effects. Keeping it local avoids coupling this domain to a
+// particular downloader protocol.
+type TaskManager interface {
+	Login(context.Context) error
+	Torrents(context.Context) ([]model.Torrent, error)
+	Delete(context.Context, string, bool) error
+	SetSavePath(context.Context, string, string) error
+}
+
+type TaskManagerFactory func(context.Context) (TaskManager, error)
 
 func NewService(s store.Store, config *appconfig.Manager, items []model.Ani) *Service {
 	return &Service{store: s, config: config, items: append([]model.Ani(nil), items...)}
+}
+
+// ConfigureSideEffects wires the optional downloader and executor used by
+// the Java-compatible delete/move lifecycle. Unit callers can leave it
+// unset; side effects then run synchronously for deterministic tests.
+func (s *Service) ConfigureSideEffects(factory TaskManagerFactory, background func(func()), configDir string) {
+	s.mu.Lock()
+	s.taskManagerFactory = factory
+	s.background = background
+	s.configDir = configDir
+	s.mu.Unlock()
+}
+
+// ConfigureAddSideEffect wires the Java-compatible first refresh performed
+// after a subscription is persisted. It is optional so the domain service
+// remains usable in isolated tests and in import-only tools.
+func (s *Service) ConfigureAddSideEffect(callback func(model.Ani)) {
+	s.mu.Lock()
+	s.onAdd = callback
+	s.mu.Unlock()
 }
 
 func (s *Service) List() model.ListAni {
@@ -144,17 +180,27 @@ func (s *Service) Add(item model.Ani) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index, existing := range s.items {
 		if existing.ID == item.ID {
+			s.mu.Unlock()
 			return errors.New("此订阅已存在")
 		}
 		if existing.Title == item.Title && existing.Season == item.Season {
 			if !appconfig.Bool(s.config.Snapshot(), "replace") {
+				s.mu.Unlock()
 				return errors.New("订阅标题重复")
 			}
 			s.items[index] = item
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			callback := s.onAdd
+			s.mu.Unlock()
+			if callback != nil {
+				callback(item)
+			}
+			return nil
 		}
 	}
 	if item.ReleaseDate == "" {
@@ -164,7 +210,16 @@ func (s *Service) Add(item model.Ani) error {
 		item.Type = "mikan"
 	}
 	s.items = append(s.items, item)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	callback := s.onAdd
+	s.mu.Unlock()
+	if callback != nil {
+		callback(item)
+	}
+	return nil
 }
 
 func (s *Service) Set(item model.Ani) error { return s.SetWithMove(item, false) }
@@ -174,29 +229,44 @@ func (s *Service) SetWithMove(item model.Ani, move bool) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index, existing := range s.items {
 		if existing.ID != item.ID && existing.Title == item.Title && existing.Season == item.Season {
+			s.mu.Unlock()
 			return errors.New("订阅标题重复")
 		}
 		if existing.ID == item.ID {
+			oldItem := existing
 			item.CurrentEpisodeNumber = existing.CurrentEpisodeNumber
 			item.LastDownloadTime = existing.LastDownloadTime
 			s.items[index] = item
 			if err := s.saveLocked(); err != nil {
+				s.mu.Unlock()
 				return err
 			}
+			var oldPath, newPath string
+			mediaMove := false
 			if move {
-				oldPath, oldErr := pathFor(s.config.Snapshot(), existing, "")
-				newPath, newErr := pathFor(s.config.Snapshot(), item, "")
-				if oldErr != nil || newErr != nil {
-					return errors.New("解析订阅媒体路径失败")
-				}
-				return moveDirectoryContents(oldPath, newPath)
+				var oldErr, newErr error
+				oldPath, oldErr = pathFor(s.config.Snapshot(), oldItem, "")
+				newPath, newErr = pathFor(s.config.Snapshot(), item, "")
+				mediaMove = oldErr == nil && newErr == nil
 			}
+			s.mu.Unlock()
+			// Torrent caches are independent from the media directory. Java
+			// moves them whenever a subscription is edited, including when the
+			// user chose not to move downloaded media. Keep that lifecycle here;
+			// the canonical Go cache is ID-based, while the legacy spelling is
+			// still migrated when it is present.
+			s.runSideEffect(func() {
+				if mediaMove {
+					s.relocate(context.Background(), oldItem, oldPath, newPath)
+				}
+				s.moveTorrentCache(oldItem, item)
+			})
 			return nil
 		}
 	}
+	s.mu.Unlock()
 	return ErrNotFound
 }
 
@@ -205,7 +275,6 @@ func (s *Service) Delete(ids []string, deleteFiles bool) error {
 		return ErrEmptySelection
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	selected := map[string]bool{}
 	for _, id := range ids {
 		selected[id] = true
@@ -222,24 +291,166 @@ func (s *Service) Delete(ids []string, deleteFiles bool) error {
 		kept = append(kept, item)
 	}
 	if removed == 0 {
+		s.mu.Unlock()
 		return ErrNotFound
 	}
 	s.items = kept
 	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	if deleteFiles {
-		for _, item := range removedItems {
-			path, pathErr := pathFor(s.config.Snapshot(), item, "")
-			if pathErr != nil {
-				return pathErr
-			}
-			if err := removeMediaDirectory(path); err != nil {
-				return err
+	s.mu.Unlock()
+	if err := s.runSideEffect(func() { s.cleanupRemoved(context.Background(), removedItems, deleteFiles) }); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) runSideEffect(fn func()) error {
+	s.mu.RLock()
+	background := s.background
+	s.mu.RUnlock()
+	if background != nil {
+		background(fn)
+		return nil
+	}
+	fn()
+	return nil
+}
+
+func (s *Service) relocate(ctx context.Context, oldItem model.Ani, oldPath, newPath string) {
+	if filepath.Clean(oldPath) == filepath.Clean(newPath) {
+		return
+	}
+	s.mu.RLock()
+	factory := s.taskManagerFactory
+	s.mu.RUnlock()
+	if factory != nil {
+		if manager, err := factory(ctx); err == nil && manager.Login(ctx) == nil {
+			if tasks, err := manager.Torrents(ctx); err == nil {
+				for _, task := range tasks {
+					if samePath(task.SavePath, oldPath) {
+						_ = manager.SetSavePath(ctx, task.Hash, newPath)
+					}
+				}
 			}
 		}
 	}
-	return nil
+	_ = moveDirectoryContents(oldPath, newPath)
+}
+
+// moveTorrentCache migrates the cache directory used by the Go RSS layer.
+// The canonical name follows rss.safeHash: IDs are lower-cased and unsafe
+// values are encoded. The second candidate preserves the older subscription
+// service spelling so an edit can repair a cache created before this rule was
+// unified.
+func (s *Service) moveTorrentCache(oldItem, newItem model.Ani) {
+	s.mu.RLock()
+	configDir := s.configDir
+	s.mu.RUnlock()
+	if configDir == "" {
+		return
+	}
+	target := torrentCachePath(configDir, newItem.ID)
+	seen := map[string]bool{}
+	for _, source := range torrentCachePaths(configDir, oldItem.ID) {
+		if seen[source] || filepath.Clean(source) == filepath.Clean(target) {
+			continue
+		}
+		seen[source] = true
+		if _, err := os.Stat(source); err != nil {
+			continue
+		}
+		// Do not merge or overwrite two independent cache directories. The
+		// next refresh can continue using the already-canonical target.
+		if _, err := os.Stat(target); err == nil {
+			return
+		}
+		_ = moveDirectoryContents(source, target)
+		return
+	}
+}
+
+func (s *Service) cleanupRemoved(ctx context.Context, items []model.Ani, deleteFiles bool) {
+	s.mu.RLock()
+	factory, configDir := s.taskManagerFactory, s.configDir
+	s.mu.RUnlock()
+	var manager TaskManager
+	if deleteFiles && factory != nil {
+		if candidate, err := factory(ctx); err == nil && candidate.Login(ctx) == nil {
+			manager = candidate
+		}
+	}
+	for _, item := range items {
+		if configDir != "" {
+			// The cache is keyed by subscription ID and must be removed even
+			// when a malformed custom download path prevents media cleanup.
+			for _, cachePath := range torrentCachePaths(configDir, item.ID) {
+				_ = os.RemoveAll(cachePath)
+			}
+		}
+		path, err := pathFor(s.config.Snapshot(), item, "")
+		if err != nil {
+			continue
+		}
+		if manager != nil {
+			if tasks, taskErr := manager.Torrents(ctx); taskErr == nil {
+				for _, task := range tasks {
+					if samePath(task.SavePath, path) {
+						_ = manager.Delete(ctx, task.Hash, true)
+					}
+				}
+			}
+		}
+		if deleteFiles {
+			_ = removeMediaDirectory(path)
+		}
+	}
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	return leftErr == nil && rightErr == nil && leftAbs == rightAbs
+}
+
+func torrentCachePath(configDir, id string) string {
+	return filepath.Join(configDir, "torrents", canonicalCacheComponent(id))
+}
+
+func torrentCachePaths(configDir, id string) []string {
+	paths := []string{torrentCachePath(configDir, id)}
+	legacy := filepath.Join(configDir, "torrents", legacyCacheComponent(id))
+	if filepath.Clean(legacy) != filepath.Clean(paths[0]) {
+		paths = append(paths, legacy)
+	}
+	return paths
+}
+
+func canonicalCacheComponent(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return "invalid-" + fmt.Sprintf("%x", []byte(value))
+		}
+	}
+	return value
+}
+
+func legacyCacheComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return "invalid-" + fmt.Sprintf("%x", []byte(value))
+		}
+	}
+	return value
 }
 
 func (s *Service) BatchEnable(value bool, ids []string) error {

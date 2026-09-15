@@ -122,6 +122,25 @@ func TestDispatcherHTTPNotificationsAndEmbyRefresh(t *testing.T) {
 	}
 }
 
+func TestTelegramUpdatesFillsMissingUsernameFromFirstAndLastName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottoken/getUpdates" {
+			t.Fatalf("Telegram path = %q", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"result":[{"message":{"chat":{"id":7,"type":"private","first_name":"Ada","last_name":"Lovelace"}}}]}`)
+	}))
+	defer server.Close()
+
+	d := notification.New(configReader(t, nil), t.TempDir(), nil, nil)
+	updates, err := d.TelegramUpdates(context.Background(), map[string]any{"telegramApiHost": server.URL, "telegramBotToken": "token"})
+	if err != nil || len(updates) != 1 || updates[0]["username"] != "Ada Lovelace" || updates[0]["firstName"] != "Ada" || updates[0]["lastName"] != "Lovelace" {
+		t.Fatalf("Telegram updates = %#v, err=%v", updates, err)
+	}
+	if _, present := updates[0]["first_name"]; present {
+		t.Fatalf("Telegram update retained snake_case field: %#v", updates[0])
+	}
+}
+
 func TestDispatcherSMTPAndShellBoundaries(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

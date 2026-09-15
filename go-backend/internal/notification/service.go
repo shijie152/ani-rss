@@ -67,10 +67,14 @@ func NewConfig() map[string]any {
 		"serverChanType": "SERVER_CHAN", "serverChanSendKey": "", "serverChan3ApiUrl": "", "serverChanTitleAction": true,
 		"telegramBotToken": "", "telegramChatId": "", "telegramTopicId": -1, "telegramApiHost": "https://api.telegram.org", "telegramImage": true, "telegramFormat": "",
 		"webHookMethod": "POST", "webHookUrl": "", "webHookHeader": "", "webHookBody": "",
-		"embyRefresh": false, "embyHost": "", "embyApiKey": "", "embyRefreshViewIds": []any{}, "embyDelayed": 0,
+		// Java leaves embyHost nil in a newly-created NotificationConfig.
+		// Gson omits that null field from /api/newNotification; keep the
+		// field absent until the user enters a value so the UI-facing JSON
+		// shape remains identical.
+		"embyRefresh": false, "embyApiKey": "", "embyRefreshViewIds": []any{}, "embyDelayed": 0,
 		"shell": "", "aliveLimit": 10,
-		"fileMoveTarget": "/Media/${title}/Season ${season}", "fileMoveOvaTarget": "/Media/${title}", "fileMoveDeleteOldEpisode": false, "fileMoveCopyModel": false,
-		"openListUploadHost": "http://127.0.0.1:5244", "openListUploadApiKey": "", "openListUploadPath": "/Media/${title}/Season ${season}", "openListUploadOvaPath": "/Media/${title}", "openListUploadDeleteLocalFile": false, "openListUploadDeleteOldEpisode": false,
+		"fileMoveTarget": "/CD2/115/Media/番剧/${title}/Season ${season}", "fileMoveOvaTarget": "/CD2/115/Media/剧场版/${title}", "fileMoveDeleteOldEpisode": false, "fileMoveCopyModel": false,
+		"openListUploadHost": "http://127.0.0.1:5244", "openListUploadApiKey": "", "openListUploadPath": "/115/Media/番剧/${title}/Season ${season}", "openListUploadOvaPath": "/115/Media/剧场版/${title}", "openListUploadDeleteLocalFile": false, "openListUploadDeleteOldEpisode": false,
 		"barkServerUrl": "https://api.day.app", "barkDeviceKeys": []any{}, "barkGroup": "ani-rss", "barkUseMarkdown": false, "barkLevel": "active", "barkVolume": 5,
 	}
 }
@@ -86,7 +90,10 @@ func (d *Dispatcher) Test(ctx context.Context, cfg map[string]any, event Event) 
 func (d *Dispatcher) TelegramUpdates(ctx context.Context, cfg map[string]any) ([]map[string]any, error) {
 	token := stringValue(cfg["telegramBotToken"])
 	if token == "" {
-		return []map[string]any{}, errors.New("Telegram token 为空")
+		// The legacy controller treats an empty token as an unconfigured chat
+		// picker and returns an empty list. Keep that default non-failing: the
+		// notification editor uses this endpoint before Telegram is configured.
+		return []map[string]any{}, nil
 	}
 	host := strings.TrimRight(stringValue(cfg["telegramApiHost"]), "/")
 	if host == "" {
@@ -101,6 +108,9 @@ func (d *Dispatcher) TelegramUpdates(ctx context.Context, cfg map[string]any) ([
 			Message *struct {
 				Chat map[string]any `json:"chat"`
 			} `json:"message"`
+			MyChatMember *struct {
+				Chat map[string]any `json:"chat"`
+			} `json:"my_chat_member"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
@@ -108,17 +118,47 @@ func (d *Dispatcher) TelegramUpdates(ctx context.Context, cfg map[string]any) ([
 	}
 	result, seen := []map[string]any{}, map[string]bool{}
 	for _, update := range response.Result {
-		if update.Message == nil || update.Message.Chat == nil {
+		message := update.Message
+		if message == nil {
+			message = update.MyChatMember
+		}
+		if message == nil || message.Chat == nil {
 			continue
 		}
-		id := fmt.Sprint(update.Message.Chat["id"])
+		chat := telegramChat(message.Chat)
+		id := fmt.Sprint(chat["id"])
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
-		result = append(result, update.Message.Chat)
+		result = append(result, chat)
 	}
 	return result, nil
+}
+
+// telegramChat converts Telegram's snake_case wire shape to the Java DTO's
+// camelCase JSON shape. Gson deserializes both aliases but serializes the Java
+// field names, and the UI displays the synthesized username when Telegram
+// does not provide one.
+func telegramChat(raw map[string]any) map[string]any {
+	chat := make(map[string]any, 5)
+	copyField := func(output string, names ...string) {
+		for _, name := range names {
+			if value, ok := raw[name]; ok && value != nil {
+				chat[output] = value
+				return
+			}
+		}
+	}
+	copyField("id", "id")
+	copyField("firstName", "first_name", "firstName")
+	copyField("lastName", "last_name", "lastName")
+	copyField("username", "username")
+	copyField("type", "type")
+	if stringValue(chat["username"]) == "" {
+		chat["username"] = strings.TrimSpace(strings.Join([]string{stringValue(chat["firstName"]), stringValue(chat["lastName"])}, " "))
+	}
+	return chat
 }
 
 func New(config appconfig.Reader, configDir string, client *http.Client, logger *slog.Logger) *Dispatcher {

@@ -142,6 +142,21 @@ func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
 	}
 }
 
+func TestSubtitlesForExposesOnlyBrowserPlayableSidecars(t *testing.T) {
+	directory := t.TempDir()
+	video := filepath.Join(directory, "Demo S01E01.mkv")
+	for _, name := range []string{"Demo S01E01.chs.ass", "Demo S01E01.eng.srt", "Demo S01E01.jpn.ssa", "Demo S01E01.raw.sup"} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("subtitle"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items := media.SubtitlesFor(video)
+	if len(items) != 2 || items[0].Type != "ass" || items[1].Type != "srt" {
+		t.Fatalf("playable sidecars = %#v", items)
+	}
+}
+
 func TestEmbeddedMatroskaTextSubtitlesAreReturnedAsVTT(t *testing.T) {
 	var data bytes.Buffer
 	document := struct {

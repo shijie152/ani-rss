@@ -3,8 +3,12 @@
 package rss
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -30,10 +34,65 @@ type entry struct {
 	InfoHash    string    `xml:"infoHash"`
 	Size        string    `xml:"size"`
 	NyaaSize    string    `xml:"{http://nyaa.si/xml/}size"`
+	Torrent     torrent   `xml:"torrent"`
 }
 type enclosure struct {
 	URL    string `xml:"url,attr"`
 	Length string `xml:"length,attr"`
+}
+
+type torrent struct {
+	InfoHash      string `xml:"infohash"`
+	PubDate       string `xml:"pubDate"`
+	ContentLength string `xml:"contentLength"`
+	MagnetURI     string `xml:"magneturi"`
+}
+
+// Fetch downloads an RSS document using the caller's HTTP policy. It is used
+// by conversion as well as the refresh coordinator so default conversion
+// behavior can inspect the same feed without coupling backend handlers to
+// source-specific HTTP details.
+func Fetch(ctx context.Context, client *http.Client, target string, retries int) ([]byte, error) {
+	if strings.TrimSpace(target) == "" {
+		return nil, errors.New("RSS地址不能为空")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	if retries < 1 {
+		retries = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < retries; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("User-Agent", "ani-rss-go")
+		response, err := client.Do(request)
+		if err == nil {
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+			_ = response.Body.Close()
+			if readErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+				return body, nil
+			}
+			if readErr != nil {
+				lastErr = readErr
+			} else {
+				lastErr = fmt.Errorf("RSS服务返回 HTTP %d", response.StatusCode)
+			}
+		} else {
+			lastErr = err
+		}
+		if attempt+1 < retries {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
+			}
+		}
+	}
+	return nil, lastErr
 }
 
 func Parse(data []byte, subgroup, source string) ([]model.Resource, error) {
@@ -48,11 +107,17 @@ func Parse(data []byte, subgroup, source string) ([]model.Resource, error) {
 			download = strings.TrimSpace(item.Link)
 		}
 		if download == "" {
+			download = strings.TrimSpace(item.Torrent.MagnetURI)
+		}
+		if download == "" {
 			continue
 		}
 		resource := model.Resource{Title: strings.TrimSpace(item.Title), DownloadURL: download, TorrentURL: download, Description: strings.TrimSpace(item.Description), Source: source, Subgroup: subgroup, Master: true}
 		resource.Episode = Episode(resource.Title)
 		resource.InfoHash = strings.ToLower(strings.TrimSpace(item.InfoHash))
+		if resource.InfoHash == "" {
+			resource.InfoHash = strings.ToLower(strings.TrimSpace(item.Torrent.InfoHash))
+		}
 		if resource.InfoHash == "" {
 			resource.InfoHash = infoHash(download, item.GUID)
 		}
@@ -60,13 +125,20 @@ func Parse(data []byte, subgroup, source string) ([]model.Resource, error) {
 		if resource.Size, _ = strconv.ParseInt(strings.TrimSpace(item.Enclosure.Length), 10, 64); resource.Size == 0 {
 			resource.Size, _ = strconv.ParseInt(strings.TrimSpace(item.Size), 10, 64)
 		}
+		if resource.Size == 0 {
+			resource.Size, _ = strconv.ParseInt(strings.TrimSpace(item.Torrent.ContentLength), 10, 64)
+		}
 		if item.NyaaSize != "" {
 			resource.FormatSize = item.NyaaSize
 		}
 		if resource.FormatSize == "" && resource.Size > 0 {
 			resource.FormatSize = formatSize(resource.Size)
 		}
-		if value, err := httpDate(item.PubDate); err == nil {
+		pubDate := strings.TrimSpace(item.PubDate)
+		if pubDate == "" {
+			pubDate = strings.TrimSpace(item.Torrent.PubDate)
+		}
+		if value, err := httpDate(pubDate); err == nil {
 			resource.PublishedAt = &value
 		}
 		if strings.HasPrefix(strings.ToLower(download), "magnet:") {
@@ -100,7 +172,13 @@ func infoHash(download, guid string) string {
 	if strings.Contains(strings.ToLower(download), "btih:") {
 		lower := strings.ToLower(download)
 		start := strings.Index(lower, "btih:") + 5
-		candidate = strings.FieldsFunc(download[start:], func(r rune) bool { return r == '&' || r == '"' })[0]
+		value := download[start:]
+		if end := strings.IndexAny(value, `&"'<>`); end >= 0 {
+			value = value[:end]
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			candidate = value
+		}
 	}
 	return candidate
 }

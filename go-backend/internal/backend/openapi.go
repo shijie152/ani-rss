@@ -12,6 +12,7 @@ var openAPISummaries = map[string]string{
 	"/api/mikan": "获取 Mikan 番剧列表", "/api/mikanGroup": "获取 Mikan 字幕组", "/api/aniBT": "AniBT 番剧列表",
 	"/api/aniBTGroup": "获取 AniBT 字幕组", "/api/animeGardenList": "AnimeGarden 番剧列表", "/api/animeGardenGroup": "AnimeGarden 字幕组",
 	"/api/searchBgm": "搜索 Bangumi", "/api/getAniBySubjectId": "根据 Bangumi ID 创建订阅", "/api/getBgmTitle": "获取 Bangumi 标题",
+	"/api/rate": "获取 Bangumi 评分", "/api/setRate": "保存 Bangumi 评分", "/api/meBgm": "获取 Bangumi 账号信息", "/api/bgm/oauth/callback": "Bangumi OAuth 回调",
 	"/api/rssToAni": "将 RSS 转为订阅", "/api/refreshAll": "刷新全部订阅", "/api/refreshAni": "刷新订阅",
 	"/api/previewAni": "预览订阅", "/api/torrentsInfos": "下载任务列表", "/api/startCollection": "开始合集下载",
 	"/api/previewCollection": "预览合集", "/api/getCollectionSubgroup": "获取合集字幕组", "/api/scrape": "刮削订阅",
@@ -30,15 +31,14 @@ var openAPIQueryParameters = map[string][]parameterSpec{
 	"/api/animeGardenGroup":         {{Name: "bgmId", Description: "Bangumi 番剧 ID", Required: true}},
 	"/api/searchBgm":                {{Name: "name", Description: "搜索名称", Required: true}},
 	"/api/getAniBySubjectId":        {{Name: "id", Description: "Bangumi 番剧 ID", Required: true}},
+	"/api/bgm/oauth/callback":       {{Name: "code", Description: "Bangumi OAuth 授权码", Required: true}},
 	"/api/deleteAni":                {{Name: "deleteFiles", Description: "是否删除媒体文件", Type: "boolean", Required: true}},
 	"/api/batchEnable":              {{Name: "value", Description: "启用或禁用", Type: "boolean", Required: true}},
 	"/api/updateTotalEpisodeNumber": {{Name: "force", Description: "是否强制更新", Type: "boolean", Required: true}},
-	"/api/previewAni":               {{Name: "force", Description: "是否强制", Type: "boolean"}},
 	"/api/deleteTorrent":            {{Name: "id", Description: "订阅 ID", Required: true}, {Name: "hash", Description: "逗号分隔的 InfoHash", Required: true}},
-	"/api/getThemoviedbGroup":       {{Name: "id", Description: "TMDB ID", Required: true}},
 	"/api/getSubtitles":             {{Name: "filename", Description: "Base64 编码的文件名", Required: true}},
 	"/api/file":                     {{Name: "filename", Description: "Base64 编码的文件名", Required: true}},
-	"/api/stop":                     {{Name: "status", Description: "停止或重启状态", Type: "integer"}},
+	"/api/stop":                     {{Name: "status", Description: "停止或重启状态", Type: "integer", Required: true}},
 	"/api/proxyImage":               {{Name: "imgUrl", Description: "Base64 编码的图片 URL", Required: true}},
 }
 
@@ -50,7 +50,7 @@ type parameterSpec struct {
 }
 
 func (a *App) openapi(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json;charset=UTF-8")
 	_ = json.NewEncoder(w).Encode(a.openapiDocument())
 }
 
@@ -129,7 +129,7 @@ func resultSchema() map[string]any {
 }
 
 func requestBody(method, path string) map[string]any {
-	if method != http.MethodPost || path == "/api/ping" || path == "/api/listAni" || path == "/api/refreshAll" || path == "/api/newNotification" || path == "/api/about" || path == "/api/update" {
+	if method != http.MethodPost || path == "/api/ping" || path == "/api/listAni" || path == "/api/refreshAll" || path == "/api/newNotification" || path == "/api/about" || path == "/api/update" || path == "/api/meBgm" || path == "/api/bgm/oauth/callback" {
 		return nil
 	}
 	if path == "/api/importConfig" || path == "/api/webui/upload" || path == "/api/upload" || path == "/api/uploadAndRead" || path == "/api/uploadAndReadToBase64" {

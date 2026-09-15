@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<rss><channel><item><title>0000000000</title><link>000000000000000Btih:</link></item></channel></rss>")

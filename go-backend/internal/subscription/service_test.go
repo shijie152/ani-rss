@@ -12,6 +12,34 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
 )
 
+type fakeTaskManager struct {
+	tasks       []model.Torrent
+	loginCalls  int
+	deleteCalls []string
+	moveCalls   []string
+}
+
+func (f *fakeTaskManager) Login(context.Context) error {
+	f.loginCalls++
+	return nil
+}
+
+func (f *fakeTaskManager) Torrents(context.Context) ([]model.Torrent, error) {
+	return append([]model.Torrent(nil), f.tasks...), nil
+}
+
+func (f *fakeTaskManager) Delete(_ context.Context, hash string, deleteFiles bool) error {
+	if deleteFiles {
+		f.deleteCalls = append(f.deleteCalls, hash)
+	}
+	return nil
+}
+
+func (f *fakeTaskManager) SetSavePath(_ context.Context, hash, path string) error {
+	f.moveCalls = append(f.moveCalls, hash+"=>"+path)
+	return nil
+}
+
 func TestServiceValidatesDuplicatesAndPersistsEdits(t *testing.T) {
 	s, err := store.NewJSONStore(t.TempDir())
 	if err != nil {
@@ -262,5 +290,162 @@ func TestServiceUpdatesCurrentEpisodeFromRefreshResults(t *testing.T) {
 	}
 	if got := service.Items()[0].CurrentEpisodeNumber; got != 3 {
 		t.Fatalf("download-new current episode = %d, want 3", got)
+	}
+}
+
+func TestServiceMoveUpdatesMatchingDownloaderTasksAndMovesMedia(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := config.Update(model.Config{"downloadPathTemplate": filepath.Join(root, "${title}")}); err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "move", Title: "Before", URL: "https://example.test/rss", Season: 1}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	oldPath := filepath.Join(root, "Before")
+	newPath := filepath.Join(root, "After")
+	if err := os.MkdirAll(oldPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldPath, "episode.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTaskManager{tasks: []model.Torrent{{Hash: "move-hash", SavePath: oldPath}, {Hash: "other-hash", SavePath: filepath.Join(root, "other")}}}
+	service.ConfigureSideEffects(func(context.Context) (subscription.TaskManager, error) { return fake, nil }, nil, t.TempDir())
+	updated := item
+	updated.Title = "After"
+	if err := service.SetWithMove(updated, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.moveCalls) != 1 || fake.moveCalls[0] != "move-hash=>"+newPath {
+		t.Fatalf("downloader move calls = %#v", fake.moveCalls)
+	}
+	if _, err := os.Stat(filepath.Join(newPath, "episode.mkv")); err != nil {
+		t.Fatalf("media was not moved: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old media path remains, err=%v", err)
+	}
+}
+
+func TestServiceMoveMigratesSubscriptionTorrentCache(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	configDir := t.TempDir()
+	if err := config.Update(model.Config{"downloadPathTemplate": filepath.Join(root, "${title}")}); err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "ABC DEF", Title: "Before", URL: "https://example.test/rss", Season: 1}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	legacyCache := filepath.Join(configDir, "torrents", "invalid-41424320444546")
+	canonicalCache := filepath.Join(configDir, "torrents", "invalid-61626320646566")
+	if err := os.MkdirAll(legacyCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCache, "episode.torrent"), []byte("torrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service.ConfigureSideEffects(nil, nil, configDir)
+	updated := item
+	updated.Title = "After"
+	if err := service.SetWithMove(updated, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(canonicalCache, "episode.torrent")); err != nil {
+		t.Fatalf("canonical torrent cache was not migrated: %v", err)
+	}
+	if _, err := os.Stat(legacyCache); !os.IsNotExist(err) {
+		t.Fatalf("legacy torrent cache remains, err=%v", err)
+	}
+}
+
+func TestServiceDeleteRemovesMatchingTasksCacheAndMedia(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	configDir := t.TempDir()
+	if err := config.Update(model.Config{"downloadPathTemplate": filepath.Join(root, "${title}")}); err != nil {
+		t.Fatal(err)
+	}
+	item := model.Ani{ID: "delete", Title: "Delete Me", URL: "https://example.test/rss", Season: 1}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	mediaPath := filepath.Join(root, "Delete Me")
+	if err := os.MkdirAll(mediaPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaPath, "episode.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(configDir, "torrents", item.ID)
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "episode.torrent"), []byte("torrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTaskManager{tasks: []model.Torrent{{Hash: "delete-hash", SavePath: mediaPath}, {Hash: "other-hash", SavePath: filepath.Join(root, "other")}}}
+	service.ConfigureSideEffects(func(context.Context) (subscription.TaskManager, error) { return fake, nil }, nil, configDir)
+	if err := service.Delete([]string{item.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleteCalls) != 1 || fake.deleteCalls[0] != "delete-hash" {
+		t.Fatalf("downloader delete calls = %#v", fake.deleteCalls)
+	}
+	if _, err := os.Stat(mediaPath); !os.IsNotExist(err) {
+		t.Fatalf("media path remains, err=%v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("torrent cache remains, err=%v", err)
+	}
+	// Ensure the test also exercises the Java-like immediate list mutation.
+	if len(service.Items()) != 0 {
+		t.Fatal("deleted subscription remains in memory")
+	}
+}
+
+func TestServiceDeleteRemovesNormalizedTorrentCache(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := appconfig.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDir := t.TempDir()
+	item := model.Ani{ID: "ABC DEF", Title: "Uppercase", URL: "https://example.test/rss", Season: 1}
+	service := subscription.NewService(s, config, []model.Ani{item})
+	cachePath := filepath.Join(configDir, "torrents", "invalid-61626320646566")
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "episode.torrent"), []byte("torrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service.ConfigureSideEffects(nil, nil, configDir)
+	if err := service.Delete([]string{item.ID}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("normalized torrent cache remains, err=%v", err)
 	}
 }

@@ -68,7 +68,7 @@ func (b *logBuffer) Handle(_ context.Context, record slog.Record) error {
 func (b *logBuffer) List() []model.Log {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return append([]model.Log(nil), b.items...)
+	return append([]model.Log{}, b.items...)
 }
 func (b *logBuffer) Clear() { b.mu.Lock(); b.items = b.items[:0]; b.mu.Unlock() }
 
@@ -204,14 +204,25 @@ func (a *App) exportConfig(w http.ResponseWriter, _ *http.Request) {
 	}
 	_ = archive.Close()
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `inline; filename="ani-rss.backup.zip"`)
+	version := strings.TrimSpace(a.version)
+	if version == "" {
+		version = strings.TrimSpace(appconfig.String(a.config.Snapshot(), "version"))
+	}
+	if version == "" {
+		version = "dev"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="ani-rss.backup.%s.zip"`, version))
 	w.Header().Set("Content-Length", strconv.Itoa(output.Len()))
 	_, _ = w.Write(output.Bytes())
 }
 
 func (a *App) importConfig(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		writeResult(w, http.StatusRequestEntityTooLarge, nil, "备份文件过大")
+		if isRequestTooLarge(err) {
+			writeResult(w, http.StatusRequestEntityTooLarge, nil, "备份文件过大")
+		} else {
+			writeResult(w, http.StatusInternalServerError, nil, "Content-Type is not supported")
+		}
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -418,7 +429,7 @@ func (a *App) clearCache(w http.ResponseWriter, _ *http.Request) {
 		_ = os.Remove(filePath)
 		return nil
 	})
-	writeResult(w, http.StatusOK, nil, fmt.Sprintf("清理完成, 共 %d B", removed))
+	writeResult(w, http.StatusOK, nil, fmt.Sprintf("清理完成, 共清理 %s", formatBytes(removed)))
 }
 
 func (a *App) trackersUpdate(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +439,10 @@ func (a *App) trackersUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	urls := strings.FieldsFunc(appconfig.String(cfg, "trackersUpdateUrls"), func(r rune) bool { return r == '\n' || r == '\r' })
+	if len(urls) == 0 || allBlank(urls) {
+		writeResult(w, http.StatusInternalServerError, nil, "Trackers更新地址 为空")
+		return
+	}
 	trackers := map[string]bool{}
 	client, err := httpclientForConfig(cfg)
 	if err == nil {
@@ -489,7 +504,12 @@ func httpclientForConfig(cfg model.Config) (*http.Client, error) {
 }
 
 func (a *App) proxyImage(w http.ResponseWriter, r *http.Request) {
-	encoded := strings.ReplaceAll(r.URL.Query().Get("imgUrl"), " ", "+")
+	encodedURL, queryErr := requiredQuery(r, "imgUrl")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	encoded := strings.ReplaceAll(encodedURL, " ", "+")
 	imageURL, err := decodeBase64Param(encoded)
 	if err != nil {
 		writeResult(w, http.StatusForbidden, nil, "图片地址格式异常")
@@ -599,7 +619,7 @@ func (a *App) calendar(w http.ResponseWriter, _ *http.Request) {
 		lines = append(lines, "END:VEVENT")
 	}
 	lines = append(lines, "END:VCALENDAR")
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Content-Type", "text/calendar;charset=UTF-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="ani-rss-calendar.ics"`)
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = io.WriteString(w, strings.Join(lines, "\r\n")+"\r\n")
@@ -668,7 +688,12 @@ func (a *App) update(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, nil, "更新成功, 正在重启...")
 }
 func (a *App) stop(w http.ResponseWriter, r *http.Request) {
-	status, err := strconv.Atoi(r.URL.Query().Get("status"))
+	statusText, queryErr := requiredQueryWithType(r, "status", "Integer")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	status, err := strconv.Atoi(statusText)
 	if err != nil || (status != 0 && status != 1) {
 		writeResult(w, http.StatusInternalServerError, nil, "停止参数异常")
 		return
@@ -689,7 +714,11 @@ func (a *App) stop(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) webuiUpload(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		writeResult(w, http.StatusRequestEntityTooLarge, nil, "WebUI 文件过大")
+		if isRequestTooLarge(err) {
+			writeResult(w, http.StatusRequestEntityTooLarge, nil, "WebUI 文件过大")
+		} else {
+			writeResult(w, http.StatusInternalServerError, nil, "Content-Type is not supported")
+		}
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -789,8 +818,35 @@ func (a *App) webuiDelete(w http.ResponseWriter, _ *http.Request) {
 	writeResult(w, http.StatusOK, nil, "WebUI 删除完成")
 }
 func (a *App) webuiGetUpdate(w http.ResponseWriter, _ *http.Request) {
-	writeResult(w, http.StatusOK, map[string]any{"update": false, "latest": "", "downloadUrl": "", "sha256": "", "size": int64(0), "formatSize": "0 MiB", "markdownBody": ""}, "success")
+	writeResult(w, http.StatusInternalServerError, nil, "无 WebUI 更新")
 }
 func (a *App) webuiUpdate(w http.ResponseWriter, _ *http.Request) {
 	writeResult(w, http.StatusInternalServerError, nil, "无 WebUI 更新")
+}
+
+func allBlank(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func isRequestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func formatBytes(size int64) string {
+	value := float64(size)
+	suffix := "B"
+	for _, next := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		if value < 1024 {
+			break
+		}
+		value /= 1024
+		suffix = next
+	}
+	return fmt.Sprintf("%.2f %s", value, suffix)
 }

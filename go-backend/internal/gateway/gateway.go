@@ -106,7 +106,10 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 			handler.ServeHTTP(response, request)
 			return
 		}
-		writeGatewayError(response, http.StatusNotFound, "接口不存在")
+		// Spring's global exception handler wraps unknown routes and unsupported
+		// methods in a Result with business code 404 while leaving the HTTP
+		// transport status at 200.
+		writeGatewayError(response, http.StatusOK, http.StatusNotFound, "404 Not Found !")
 		return
 	}
 
@@ -161,15 +164,15 @@ func (gateway *Gateway) serveUI(response http.ResponseWriter, request *http.Requ
 	http.NotFound(response, request)
 }
 
-func writeGatewayError(response http.ResponseWriter, status int, message string) {
-	response.Header().Set("Content-Type", "application/json; charset=utf-8")
-	response.WriteHeader(status)
+func writeGatewayError(response http.ResponseWriter, transportStatus, resultCode int, message string) {
+	response.Header().Set("Content-Type", "application/json;charset=UTF-8")
+	response.WriteHeader(transportStatus)
 	_ = json.NewEncoder(response).Encode(struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Time    int64  `json:"t"`
 	}{
-		Code:    status,
+		Code:    resultCode,
 		Message: message,
 		Time:    time.Now().UnixMilli(),
 	})

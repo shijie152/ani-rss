@@ -121,6 +121,31 @@ func TestQBittorrentAddCarriesJavaDownloadParameters(t *testing.T) {
 	}
 }
 
+func TestQBittorrentSetSavePathDisablesAutomaticManagementFirst(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		calls = append(calls, r.URL.Path)
+		if r.URL.Path == "/api/v2/torrents/setAutoManagement" && (r.Form.Get("hashes") != "ABC" || r.Form.Get("enable") != "false") {
+			t.Fatalf("auto management form = %#v", r.Form)
+		}
+		if r.URL.Path == "/api/v2/torrents/setSavePath" && (r.Form.Get("id") != "ABC" || r.Form.Get("path") != "/new") {
+			t.Fatalf("save path form = %#v", r.Form)
+		}
+		_, _ = w.Write([]byte("Ok"))
+	}))
+	defer server.Close()
+	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	if err := adapter.SetSavePath(context.Background(), "ABC", "/new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0] != "/api/v2/torrents/setAutoManagement" || calls[1] != "/api/v2/torrents/setSavePath" {
+		t.Fatalf("qBittorrent move calls = %#v", calls)
+	}
+}
+
 func TestQBittorrentWaitsForCompletionAndReportsFailure(t *testing.T) {
 	var polls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

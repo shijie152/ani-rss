@@ -104,7 +104,9 @@
       </div>
 
       <div v-loading="loading" class="season-content">
-        <el-empty v-if="!loading && !weeks.length" description="这个季度没有可用番剧"/>
+        <el-empty v-if="!loading && !weeks.length" :description="loadError || '这个季度没有可用番剧'">
+          <el-button v-if="loadError" type="primary" @click="loadSource()">重试</el-button>
+        </el-empty>
         <el-tabs v-else v-model="activeWeek" class="week-tabs">
           <el-tab-pane v-for="week in weeks"
                        :key="week.weekLabel"
@@ -159,6 +161,7 @@ import * as http from "@/js/http.js";
 import {proxyImage} from "@/js/global.js";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import AddView from "@/view/home/AddView.vue";
+import {preserveSeasonOptions, readSeasonCache, writeSeasonCache} from "./seasonCatalogCache.js";
 
 const source = ref('mikan')
 const loading = ref(false)
@@ -178,10 +181,11 @@ const expandedResourceGroups = ref([])
 const selectedResourceKeys = ref([])
 const addRef = ref()
 const cacheUpdatedAt = ref(0)
+const loadError = ref('')
 
 const SEASON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
-const SEASON_CACHE_PREFIX = 'ani-rss:season-catalog:'
 let nightlyRefreshTimer
+let loadSequence = 0
 
 const sourceLabel = computed(() => source.value === 'mikan' ? 'Mikan' : 'AniBT')
 const seasonOptions = computed(() => source.value === 'mikan'
@@ -197,25 +201,10 @@ const cacheTimeLabel = computed(() => cacheUpdatedAt.value
     ? new Date(cacheUpdatedAt.value).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
     : '')
 
-const cacheKey = (sourceName, season) => `${SEASON_CACHE_PREFIX}${sourceName}:${encodeURIComponent(season || 'current')}`
-const readCache = (sourceName, season) => {
-  try {
-    const value = localStorage.getItem(cacheKey(sourceName, season))
-    if (!value) return null
-    const cached = JSON.parse(value)
-    return cached?.data ? cached : null
-  } catch (e) {
-    return null
-  }
-}
+const readCache = (sourceName, season) => readSeasonCache(sourceName, season)
 const writeCache = (sourceName, season, data) => {
-  const savedAt = Date.now()
-  try {
-    localStorage.setItem(cacheKey(sourceName, season), JSON.stringify({savedAt, data}))
-  } catch (e) {
-    // 浏览器存储空间不足时不影响季度页面使用
-  }
-  cacheUpdatedAt.value = savedAt
+  const savedAt = writeSeasonCache(sourceName, season, data)
+  if (savedAt) cacheUpdatedAt.value = savedAt
 }
 
 const setWeeks = value => {
@@ -224,7 +213,7 @@ const setWeeks = value => {
 }
 
 const applyMikanData = data => {
-  mikanSeasons.value = data.seasons || []
+  mikanSeasons.value = preserveSeasonOptions(mikanSeasons.value, data.seasons)
   if (!mikanSeason.value || !mikanSeasons.value.some(item => item.seasonLabel === mikanSeason.value)) {
     mikanSeason.value = mikanSeasons.value.find(item => item.select)?.seasonLabel
         || mikanSeasons.value[0]?.seasonLabel
@@ -233,74 +222,94 @@ const applyMikanData = data => {
   setWeeks(data.weeks)
 }
 
-const loadMikan = async (force = false) => {
+const loadMikan = async (force = false, sequence = loadSequence) => {
   const requestedSeason = mikanSeason.value || 'current'
   const cached = readCache('mikan', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
+    if (sequence !== loadSequence) return
     applyMikanData(cached.data)
     cacheUpdatedAt.value = cached.savedAt
+    seasonLoading.value = false
+    loading.value = false
     return
   }
   seasonLoading.value = true
   loading.value = true
+  loadError.value = ''
   try {
     const selected = mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
     const res = await http.mikan('', selected || {})
+    if (sequence !== loadSequence) return
     const data = res.data || {}
     applyMikanData(data)
     writeCache('mikan', requestedSeason, data)
   } catch (e) {
+    if (sequence !== loadSequence) return
     if (cached) {
       applyMikanData(cached.data)
       cacheUpdatedAt.value = cached.savedAt
       ElMessage.warning('网络请求失败，已显示缓存的季度数据')
     } else {
+      loadError.value = '季度数据加载失败，请检查网络或代理设置后重试'
       ElMessage.error(e?.message || '加载季度数据失败')
     }
   } finally {
-    seasonLoading.value = false
-    loading.value = false
+    if (sequence === loadSequence) {
+      seasonLoading.value = false
+      loading.value = false
+    }
   }
 }
 
 const applyAniBTData = data => {
-  aniBTSeasons.value = data.availableSeasons || []
+  aniBTSeasons.value = preserveSeasonOptions(aniBTSeasons.value, data.availableSeasons)
   aniBTSeason.value = data.requestedSeason || aniBTSeason.value || aniBTSeasons.value[0] || ''
   setWeeks((data.byWeekday || []).map(item => ({weekLabel: item.weekdayLabel, items: item.animes || []})))
 }
 
-const loadAniBT = async (force = false) => {
+const loadAniBT = async (force = false, sequence = loadSequence) => {
   const requestedSeason = aniBTSeason.value || 'current'
   const cached = readCache('ani-bt', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
+    if (sequence !== loadSequence) return
     applyAniBTData(cached.data)
     cacheUpdatedAt.value = cached.savedAt
+    seasonLoading.value = false
+    loading.value = false
     return
   }
   seasonLoading.value = true
   loading.value = true
+  loadError.value = ''
   try {
     const res = await http.aniBT(aniBTSeason.value, '', '')
+    if (sequence !== loadSequence) return
     const data = res.data || {}
     applyAniBTData(data)
     writeCache('ani-bt', requestedSeason, data)
   } catch (e) {
+    if (sequence !== loadSequence) return
     if (cached) {
       applyAniBTData(cached.data)
       cacheUpdatedAt.value = cached.savedAt
       ElMessage.warning('网络请求失败，已显示缓存的季度数据')
     } else {
+      loadError.value = '季度数据加载失败，请检查网络或代理设置后重试'
       ElMessage.error(e?.message || '加载季度数据失败')
     }
   } finally {
-    seasonLoading.value = false
-    loading.value = false
+    if (sequence === loadSequence) {
+      seasonLoading.value = false
+      loading.value = false
+    }
   }
 }
 
 const loadSource = (force = false) => {
+  const sequence = ++loadSequence
   cacheUpdatedAt.value = 0
-  return source.value === 'mikan' ? loadMikan(force) : loadAniBT(force)
+  loadError.value = ''
+  return source.value === 'mikan' ? loadMikan(force, sequence) : loadAniBT(force, sequence)
 }
 const changeSource = () => {
   weeks.value = []

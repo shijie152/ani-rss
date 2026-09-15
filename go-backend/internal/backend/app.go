@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -66,9 +67,11 @@ type App struct {
 	notifications *notification.Dispatcher
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
+	backgroundWG  sync.WaitGroup
 	ownedDomains  []string
 	version       string
 	logBuffer     *logBuffer
+	logFile       *os.File
 	mcp           http.Handler
 	swagger       bool
 	updater       *update.Client
@@ -106,19 +109,78 @@ func New(options Options) (*App, error) {
 	}
 	logger := options.Logger
 	logs := newLogBuffer(appconfig.Int(manager.Snapshot(), "logsMax"))
-	if logger == nil {
-		logger = slog.New(logs)
-	} else {
-		logger = slog.New(&teeHandler{first: logs, second: logger.Handler()})
+	logDirectory := filepath.Join(applicationStore.Directory(), "logs")
+	if err := os.MkdirAll(logDirectory, 0o755); err != nil {
+		locks.Close()
+		_ = applicationStore.Close()
+		return nil, fmt.Errorf("create log directory: %w", err)
 	}
+	logFile, err := os.OpenFile(filepath.Join(logDirectory, "ani-rss.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		locks.Close()
+		_ = applicationStore.Close()
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	fileHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})
+	var handlers slog.Handler = &teeHandler{first: logs, second: fileHandler}
+	if logger != nil {
+		handlers = &teeHandler{first: handlers, second: logger.Handler()}
+	}
+	logger = slog.New(handlers)
 	if options.Version != "" {
 		if err := manager.Update(model.Config{"version": options.Version}); err != nil {
+			_ = logFile.Close()
 			locks.Close()
 			_ = applicationStore.Close()
 			return nil, err
 		}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app.logger.Info("Go backend initialized")
+	app.subscriptions.ConfigureSideEffects(func(ctx context.Context) (subscription.TaskManager, error) {
+		coordinator, factoryErr := app.newCoordinator()
+		if factoryErr != nil {
+			return nil, factoryErr
+		}
+		return coordinator.QB, nil
+	}, app.runBackground, app.configDir)
+	app.subscriptions.ConfigureAddSideEffect(func(item model.Ani) {
+		app.runBackground(func() {
+			app.refreshMu.Lock()
+			defer app.refreshMu.Unlock()
+			coordinator, coordinatorErr := app.newCoordinator()
+			if coordinatorErr != nil {
+				app.logger.Warn("initial subscription refresh setup failed", "subscription", item.ID, "error", coordinatorErr)
+				return
+			}
+			if item.Enable {
+				// Java checks downloader connectivity before fetching the RSS
+				// feed. This also keeps an enabled subscription with an
+				// intentionally unconfigured downloader from blocking startup or
+				// the response lifecycle on a feed timeout.
+				if loginErr := coordinator.QB.Login(context.Background()); loginErr != nil {
+					app.logger.Warn("initial subscription refresh skipped", "subscription", item.ID, "error", loginErr)
+					return
+				}
+				if _, refreshErr := coordinator.Refresh(context.Background(), item); refreshErr != nil {
+					app.logger.Warn("initial subscription refresh failed", "subscription", item.ID, "error", refreshErr)
+				}
+				return
+			}
+			resources, previewErr := coordinator.Preview(context.Background(), item)
+			if previewErr != nil {
+				app.logger.Warn("initial subscription preview failed", "subscription", item.ID, "error", previewErr)
+				return
+			}
+			if updateErr := app.subscriptions.UpdateCurrentEpisode(item.ID, resources); updateErr != nil {
+				app.logger.Warn("initial subscription progress update failed", "subscription", item.ID, "error", updateErr)
+			}
+		})
+	})
+	if err := app.repairLoadedSubscriptions(items); err != nil {
+		app.Close()
+		return nil, err
+	}
 	if strings.TrimSpace(options.UpdateEndpoint) != "" && options.Version != "" && options.Version != "dev" {
 		app.updater = &update.Client{Endpoint: options.UpdateEndpoint, Version: options.Version, Token: appconfig.String(manager.Snapshot(), "githubToken")}
 	}
@@ -155,10 +217,177 @@ func (a *App) AcquireDomains(domains ...string) error {
 }
 
 func (a *App) Close() {
+	a.backgroundWG.Wait()
+	if a.logFile != nil {
+		_ = a.logFile.Close()
+	}
 	a.ownership.Close()
 	if closer, ok := a.store.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	}
+}
+
+// runBackground mirrors the Java controllers' fire-and-forget executor while
+// keeping App.Close safe during tests and orderly shutdown. The request
+// context is intentionally not captured: Java work continues after the HTTP
+// response has been written.
+func (a *App) runBackground(fn func()) {
+	a.backgroundWG.Add(1)
+	go func() {
+		defer a.backgroundWG.Done()
+		fn()
+	}()
+}
+
+// repairLoadedSubscriptions mirrors AniUtil.load's compatibility pass. The
+// persisted store may contain records written by older Java versions with
+// omitted fields, so repair happens before the first list/API response and is
+// persisted once for future restarts.
+func (a *App) repairLoadedSubscriptions(items []model.Ani) error {
+	if len(items) == 0 {
+		return nil
+	}
+	cfg := a.config.Snapshot()
+	changed := false
+	now := time.Now()
+	for index := range items {
+		item := &items[index]
+		if !item.FieldPresent("releaseDate") || strings.TrimSpace(item.ReleaseDate) == "" {
+			date := now
+			if item.Year > 0 && item.Month >= 1 && item.Month <= 12 && item.Date >= 1 && item.Date <= 31 {
+				date = time.Date(item.Year, time.Month(item.Month), item.Date, 0, 0, 0, 0, time.Local)
+			}
+			item.ReleaseDate = date.Format("2006-01-02")
+			changed = true
+		}
+		if item.StandbyRSSList == nil {
+			item.StandbyRSSList = []model.StandbyRSS{}
+			changed = true
+		}
+		if item.Match == nil {
+			item.Match = []string{}
+			changed = true
+		}
+		if item.Exclude == nil {
+			item.Exclude = append([]string(nil), defaultSubscriptionExclude...)
+			changed = true
+		}
+		if item.NotDownload == nil {
+			item.NotDownload = []float64{}
+			changed = true
+		}
+		if item.CustomPriorityKeywords == nil {
+			item.CustomPriorityKeywords = []string{}
+			changed = true
+		}
+		if item.CustomTags == nil {
+			item.CustomTags = []string{}
+			changed = true
+		}
+		if item.TMDB == nil {
+			item.TMDB = map[string]any{"id": "", "name": "", "originalName": "", "date": now.Format("2006-01-02 15:04:05")}
+			changed = true
+		}
+		if !item.FieldPresent("enable") {
+			item.Enable = true
+			changed = true
+		}
+		if !item.FieldPresent("customDownloadPath") {
+			item.CustomDownloadPath = false
+			changed = true
+		}
+		if !item.FieldPresent("customDownloadPathTemplate") {
+			item.CustomDownloadPathTemplate = ""
+			changed = true
+		}
+		if !item.FieldPresent("globalExclude") {
+			item.GlobalExclude = false
+			changed = true
+		}
+		if !item.FieldPresent("customEpisode") {
+			item.CustomEpisode = appconfig.Bool(cfg, "customEpisode")
+			changed = true
+		}
+		if !item.FieldPresent("customEpisodeStr") {
+			item.CustomEpisodeStr = appconfig.String(cfg, "customEpisodeStr")
+			changed = true
+		}
+		if !item.FieldPresent("customEpisodeGroupIndex") {
+			item.CustomEpisodeGroupIndex = appconfig.Int(cfg, "customEpisodeGroupIndex")
+			changed = true
+		}
+		if !item.FieldPresent("omit") {
+			item.Omit = true
+			changed = true
+		}
+		if !item.FieldPresent("upload") {
+			item.Upload = appconfig.Bool(cfg, "upload")
+			changed = true
+		}
+		if !item.FieldPresent("procrastinating") {
+			item.Procrastinating = true
+			changed = true
+		}
+		if !item.FieldPresent("customRenameTemplateEnable") {
+			item.CustomRenameTemplateEnable = false
+			changed = true
+		}
+		if !item.FieldPresent("customRenameTemplate") {
+			item.CustomRenameTemplate = appconfig.String(cfg, "renameTemplate")
+			changed = true
+		}
+		if !item.FieldPresent("customPriorityKeywordsEnable") {
+			item.CustomPriorityKeywordsEnable = false
+			changed = true
+		}
+		if !item.FieldPresent("customUploadEnable") {
+			item.CustomUploadEnable = false
+			changed = true
+		}
+		if !item.FieldPresent("customUploadPathTarget") {
+			item.CustomUploadPathTarget = ""
+			changed = true
+		}
+		if !item.FieldPresent("message") {
+			item.Message = true
+			changed = true
+		}
+		if !item.FieldPresent("completed") {
+			item.Completed = true
+			changed = true
+		}
+		if !item.FieldPresent("customCompleted") {
+			item.CustomCompleted = false
+			changed = true
+		}
+		if !item.FieldPresent("customCompletedPathTemplate") {
+			item.CustomCompletedPathTemplate = ""
+			changed = true
+		}
+		if !item.FieldPresent("customTagsEnable") {
+			item.CustomTagsEnable = false
+			changed = true
+		}
+	}
+
+	// Java repairs every cover, including old records whose remote image was
+	// temporarily unavailable; RefreshCover supplies cover.png on failure.
+	if service, err := a.mediaService(); err == nil {
+		for index := range items {
+			cover, _ := service.RefreshCover(context.Background(), items[index].Image, false)
+			if cover != "" && items[index].Cover != cover {
+				items[index].Cover = cover
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := a.store.SaveSubscriptions(items); err != nil {
+		return fmt.Errorf("保存修补后的订阅失败: %w", err)
+	}
+	return a.subscriptions.Reload()
 }
 
 // RunSchedulers runs the scheduler domains owned by this Go process.
@@ -204,6 +433,10 @@ func (a *App) Routes() []gateway.Route {
 	routes := []gateway.Route{
 		runtime(http.MethodGet, "/api/ping", http.HandlerFunc(a.ping)),
 		runtime(http.MethodPost, "/api/ping", http.HandlerFunc(a.ping)),
+		runtime(http.MethodPut, "/api/ping", http.HandlerFunc(a.ping)),
+		runtime(http.MethodDelete, "/api/ping", http.HandlerFunc(a.ping)),
+		runtime(http.MethodPatch, "/api/ping", http.HandlerFunc(a.ping)),
+		runtime(http.MethodOptions, "/api/ping", http.HandlerFunc(a.pingOptions)),
 		runtime(http.MethodPost, "/api/login", http.HandlerFunc(a.login)),
 		runtime(http.MethodPost, "/api/config", a.protected(a.configGet)),
 		runtime(http.MethodPost, "/api/setConfig", a.protected(a.configSet)),
@@ -249,6 +482,10 @@ func (a *App) Routes() []gateway.Route {
 		{Domain: "sources", Method: http.MethodPost, Path: "/api/searchBgm", Handler: a.protected(a.searchBgm)},
 		{Domain: "sources", Method: http.MethodPost, Path: "/api/getAniBySubjectId", Handler: a.protected(a.getAniBySubjectID)},
 		{Domain: "sources", Method: http.MethodPost, Path: "/api/getBgmTitle", Handler: a.protected(a.getBGMTitle)},
+		{Domain: "sources", Method: http.MethodPost, Path: "/api/rate", Handler: a.protected(a.rate)},
+		{Domain: "sources", Method: http.MethodPost, Path: "/api/setRate", Handler: a.protected(a.setRate)},
+		{Domain: "sources", Method: http.MethodPost, Path: "/api/meBgm", Handler: a.protected(a.meBGM)},
+		{Domain: "sources", Method: http.MethodPost, Path: "/api/bgm/oauth/callback", Handler: a.protected(a.bgmOAuthCallback)},
 		{Domain: "sources", Method: http.MethodPost, Path: "/api/rssToAni", Handler: a.protected(a.rssToAni)},
 		{Domain: "rss", Method: http.MethodPost, Path: "/api/refreshAll", Handler: a.protected(a.refreshAll)},
 		{Domain: "rss", Method: http.MethodPost, Path: "/api/refreshAni", Handler: a.protected(a.refreshAni)},
@@ -286,6 +523,12 @@ func (a *App) Routes() []gateway.Route {
 
 func (a *App) ping(w http.ResponseWriter, _ *http.Request) {
 	writeResult(w, http.StatusOK, nil, "success")
+}
+
+func (a *App) pingOptions(w http.ResponseWriter, _ *http.Request) {
+	// Spring handles the OPTIONS preflight before invoking the controller, so
+	// the legacy endpoint returns an empty successful response.
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
@@ -338,7 +581,7 @@ func (a *App) customJS(w http.ResponseWriter, _ *http.Request) {
 		value = "// empty js"
 	}
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Content-Type", "application/javascript;charset=utf-8")
 	_, _ = io.WriteString(w, value)
 }
 
@@ -348,12 +591,17 @@ func (a *App) customCSS(w http.ResponseWriter, _ *http.Request) {
 		value = "/* empty css */"
 	}
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Content-Type", "text/css")
 	_, _ = io.WriteString(w, value)
 }
 
 func (a *App) testProxy(w http.ResponseWriter, r *http.Request) {
-	encoded := strings.ReplaceAll(r.URL.Query().Get("url"), " ", "+")
+	encodedURL, queryErr := requiredQuery(r, "url")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	encoded := strings.ReplaceAll(encodedURL, " ", "+")
 	targetBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil || strings.TrimSpace(string(targetBytes)) == "" {
 		writeResult(w, http.StatusInternalServerError, nil, "URL 格式异常")
@@ -448,7 +696,16 @@ func (a *App) deleteAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅列表格式异常: "+err.Error())
 		return
 	}
-	deleteFiles, _ := strconv.ParseBool(r.URL.Query().Get("deleteFiles"))
+	deleteFilesValue, queryErr := requiredQueryWithType(r, "deleteFiles", "Boolean")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	deleteFiles, err := strconv.ParseBool(deleteFilesValue)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "删除文件参数异常")
+		return
+	}
 	if err := a.subscriptions.Delete(ids, deleteFiles); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -462,7 +719,12 @@ func (a *App) batchEnable(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅列表格式异常: "+err.Error())
 		return
 	}
-	value, err := strconv.ParseBool(r.URL.Query().Get("value"))
+	valueText, queryErr := requiredQueryWithType(r, "value", "Boolean")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	value, err := strconv.ParseBool(valueText)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "启用参数异常")
 		return
@@ -480,9 +742,18 @@ func (a *App) updateTotalEpisodeNumber(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅列表格式异常: "+err.Error())
 		return
 	}
-	force, err := strconv.ParseBool(r.URL.Query().Get("force"))
+	forceText, queryErr := requiredQueryWithType(r, "force", "Boolean")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	force, err := strconv.ParseBool(forceText)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "强制参数异常")
+		return
+	}
+	if len(ids) == 0 {
+		writeResult(w, http.StatusInternalServerError, nil, "未选择订阅")
 		return
 	}
 	client, err := a.sourceClient()
@@ -497,13 +768,11 @@ func (a *App) updateTotalEpisodeNumber(w http.ResponseWriter, r *http.Request) {
 		}
 		return client.SubjectEpisodeCount(id)
 	}
-	if err := a.subscriptions.UpdateTotalEpisodes(r.Context(), force, ids, resolve); err != nil {
-		a.logger.Warn("total episode update partially failed", "error", err)
-		// Java starts this operation asynchronously and keeps the UI action
-		// successful even when one subject cannot be read.
-		writeResult(w, http.StatusOK, map[string]any{"error": err.Error()}, "已开始更新总集数")
-		return
-	}
+	a.runBackground(func() {
+		if err := a.subscriptions.UpdateTotalEpisodes(context.Background(), force, ids, resolve); err != nil {
+			a.logger.Warn("total episode update partially failed", "error", err)
+		}
+	})
 	writeResult(w, http.StatusOK, nil, "已开始更新总集数")
 }
 
@@ -530,6 +799,10 @@ func (a *App) downloadPath(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅格式异常: "+err.Error())
 		return
 	}
+	if strings.TrimSpace(item.Title) == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "订阅标题不能为空")
+		return
+	}
 	path, err := a.subscriptions.DownloadPath(item)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
@@ -549,6 +822,8 @@ func (a *App) sourceClient() (*source.Client, error) {
 		AniBTHost:       defaultString(appconfig.String(cfg, "aniBTHost"), "https://anibt.net"),
 		AnimeGardenHost: defaultString(appconfig.String(cfg, "animeGardenHost"), "https://api.animes.garden"),
 		BangumiAPI:      defaultString(appconfig.String(cfg, "bgmApi"), "https://api.bgm.tv"),
+		BGMCoverURL:     "https://cache.wushuo.top/bgm/cover",
+		Config:          cfg,
 		HTTPClient:      client,
 		Retries:         appconfig.Int(cfg, "downloadRetry"),
 		Subscriptions:   a.subscriptions.Items,
@@ -556,14 +831,20 @@ func (a *App) sourceClient() (*source.Client, error) {
 }
 
 func (a *App) mikan(w http.ResponseWriter, r *http.Request) {
+	text, queryErr := requiredQuery(r, "text")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	var season model.Config
-	if r.Body != nil {
-		_ = decodeJSON(r, &season)
+	if err := decodeJSON(r, &season); err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "Mikan 参数格式异常: "+err.Error())
+		return
 	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result map[string]any
-		result, err = client.Mikan(r.URL.Query().Get("text"), season)
+		result, err = client.Mikan(text, season)
 		if err == nil {
 			writeResult(w, http.StatusOK, result, "success")
 			return
@@ -573,10 +854,15 @@ func (a *App) mikan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) mikanGroup(w http.ResponseWriter, r *http.Request) {
+	target, queryErr := requiredQuery(r, "url")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result []map[string]any
-		result, err = client.MikanGroup(r.URL.Query().Get("url"))
+		result, err = client.MikanGroup(target)
 		if err == nil {
 			writeResult(w, http.StatusOK, result, "success")
 			return
@@ -604,10 +890,15 @@ func (a *App) aniBT(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) aniBTGroup(w http.ResponseWriter, r *http.Request) {
+	bgmID, queryErr := requiredQuery(r, "bgmId")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result []map[string]any
-		result, err = client.AniBTGroup(r.URL.Query().Get("bgmId"))
+		result, err = client.AniBTGroup(bgmID)
 		if err == nil {
 			writeResult(w, http.StatusOK, result, "success")
 			return
@@ -630,10 +921,15 @@ func (a *App) animeGardenList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) animeGardenGroup(w http.ResponseWriter, r *http.Request) {
+	bgmID, queryErr := requiredQuery(r, "bgmId")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result []map[string]any
-		result, err = client.AnimeGardenGroup(r.URL.Query().Get("bgmId"))
+		result, err = client.AnimeGardenGroup(bgmID)
 		if err == nil {
 			writeResult(w, http.StatusOK, result, "success")
 			return
@@ -643,10 +939,15 @@ func (a *App) animeGardenGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) searchBgm(w http.ResponseWriter, r *http.Request) {
+	name, queryErr := requiredQuery(r, "name")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result []map[string]any
-		result, err = client.SearchBangumi(r.URL.Query().Get("name"))
+		result, err = client.SearchBangumi(name)
 		if err == nil {
 			writeResult(w, http.StatusOK, result, "success")
 			return
@@ -656,11 +957,22 @@ func (a *App) searchBgm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) getAniBySubjectID(w http.ResponseWriter, r *http.Request) {
+	id, queryErr := requiredQuery(r, "id")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
 	client, err := a.sourceClient()
 	if err == nil {
 		var result model.Ani
-		result, err = client.SubscriptionFromSubject(r.URL.Query().Get("id"))
+		result, err = client.SubscriptionFromSubject(id)
 		if err == nil {
+			a.enrichSubscriptionMetadata(r.Context(), &result)
+			a.applySubscriptionDefaults(&result, true)
+			if service, serviceErr := a.mediaService(); serviceErr == nil {
+				cover, _ := service.RefreshCover(r.Context(), result.Image, false)
+				result.Cover = cover
+			}
 			writeResult(w, http.StatusOK, result, "success")
 			return
 		}
@@ -698,13 +1010,70 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	id := source.SubjectID(input.BGMURL)
-	if id == "" {
-		id = source.SubjectID(input.URL)
+	if strings.TrimSpace(input.URL) == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "RSS解析失败 RSS地址 不能为空")
+		return
 	}
 	client, err := a.sourceClient()
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
+		return
+	}
+	typeName := defaultString(input.Type, "mikan")
+	var resolvedMikan model.Ani
+	id := source.SubjectID(input.BGMURL)
+	parsedURL, parseErr := url.Parse(input.URL)
+	if parseErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "RSS地址格式异常: "+parseErr.Error())
+		return
+	}
+	switch typeName {
+	case "mikan":
+		// Java only loads the Mikan detail page when both optional fields are
+		// absent. The normal single-add UI already supplies the linked BGM URL
+		// and subgroup; batch-add supplies neither and therefore takes this
+		// branch.
+		if strings.TrimSpace(input.BGMURL) == "" && strings.TrimSpace(input.Subgroup) == "" {
+			resolved, resolveErr := client.ResolveMikanSubscription(input.URL)
+			if resolveErr == nil {
+				input.BGMURL = resolved.BGMURL
+				resolvedMikan = resolved
+				if input.Subgroup == "" {
+					input.Subgroup = resolved.Subgroup
+				}
+				id = source.SubjectID(input.BGMURL)
+			} else {
+				writeResult(w, http.StatusInternalServerError, nil, sourceError(resolveErr))
+				return
+			}
+		}
+	case "ani-bt":
+		if values, exists := parsedURL.Query()["bgmId"]; exists && len(values) > 0 {
+			input.BGMURL = "https://bgm.tv/subject/" + values[0]
+		} else {
+			input.BGMURL = ""
+		}
+		if strings.TrimSpace(input.Subgroup) == "" {
+			if values, exists := parsedURL.Query()["groupSlug"]; exists && len(values) > 0 {
+				input.Subgroup = values[0]
+			}
+		}
+	case "anime-garden":
+		if values, exists := parsedURL.Query()["subject"]; exists && len(values) > 0 {
+			input.BGMURL = "https://bgm.tv/subject/" + values[0]
+		} else {
+			input.BGMURL = ""
+		}
+		if values, exists := parsedURL.Query()["fansub"]; exists && len(values) > 0 {
+			input.Subgroup = values[0]
+		}
+	default:
+		// Java's `other` branch uses only the BGM URL supplied in the body;
+		// query parameters on the RSS URL are not inferred.
+	}
+	id = source.SubjectID(input.BGMURL)
+	if id == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "bgmUrl 不能为空")
 		return
 	}
 	item, err := client.SubscriptionFromSubject(id)
@@ -712,13 +1081,304 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
 	}
-	item.URL, item.Type, item.Subgroup = input.URL, defaultString(input.Type, "mikan"), input.Subgroup
-	if input.Enable == nil {
-		item.Enable = true
-	} else {
-		item.Enable = *input.Enable
+	item.URL, item.Type, item.Subgroup = input.URL, typeName, input.Subgroup
+	if typeName == "mikan" && resolvedMikan.MikanTitle != "" {
+		item.MikanTitle = resolvedMikan.MikanTitle
+	}
+	item.Enable = input.Enable == nil || *input.Enable
+	a.enrichSubscriptionMetadata(r.Context(), &item)
+	a.applySubscriptionDefaults(&item, false)
+	a.applyRSSConversionDefaults(&item, typeName)
+	if strings.TrimSpace(item.Subgroup) == "" {
+		item.Subgroup = "未知字幕组"
+	}
+	if item.Subgroup == "未知字幕组" {
+		if resources, fetchErr := a.rssConversionResources(r.Context(), item.URL, &item); fetchErr == nil {
+			if subgroup := inferRSSSubgroup(resources); subgroup != "" {
+				item.Subgroup = subgroup
+			}
+		}
+	}
+	if item.Subgroup == "" {
+		item.Subgroup = "未知字幕组"
+	}
+	if appconfig.Bool(a.config.Snapshot(), "copyMasterToStandby") && appconfig.Bool(a.config.Snapshot(), "standbyRss") {
+		item.StandbyRSSList = append(item.StandbyRSSList, model.StandbyRSS{Label: item.Subgroup, URL: strings.TrimSpace(item.URL), Offset: 0})
+	}
+	if service, serviceErr := a.mediaService(); serviceErr == nil {
+		// RefreshCover returns Java's fallback path even when downloading the
+		// remote image fails. Keep that path in the response so the edit form
+		// never receives an empty cover field.
+		cover, _ := service.RefreshCover(r.Context(), item.Image, false)
+		item.Cover = cover
+	}
+	if !item.OVA && appconfig.Bool(a.config.Snapshot(), "offset") {
+		if resources, fetchErr := a.rssConversionResources(r.Context(), item.URL, &item); fetchErr == nil {
+			minimum := 0.0
+			for _, resource := range resources {
+				if resource.Episode <= 0 || resource.Episode != float64(int(resource.Episode)) {
+					continue
+				}
+				if minimum == 0 || resource.Episode < minimum {
+					minimum = resource.Episode
+				}
+			}
+			if minimum > 0 {
+				item.Offset = -(int(minimum) - 1)
+				for index := range item.StandbyRSSList {
+					item.StandbyRSSList[index].Offset = item.Offset
+				}
+			}
+		}
 	}
 	writeResult(w, http.StatusOK, item, "success")
+}
+
+func (a *App) rssConversionResources(ctx context.Context, feedURL string, item *model.Ani) ([]model.Resource, error) {
+	cfg := a.config.Snapshot()
+	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	body, err := rss.Fetch(ctx, client, feedURL, appconfig.Int(cfg, "downloadRetry"))
+	if err != nil {
+		return nil, err
+	}
+	resources, err := rss.Parse(body, item.Subgroup, feedURL)
+	if err != nil {
+		return nil, err
+	}
+	if item.Subgroup == "未知字幕组" {
+		if subgroup := inferRSSSubgroup(resources); subgroup != "" {
+			item.Subgroup = subgroup
+			for index := range resources {
+				resources[index].Subgroup = subgroup
+			}
+		}
+	}
+	options := rss.MatchOptions{
+		GlobalExclude:    appconfig.Strings(cfg, "exclude"),
+		DownloadNew:      item.DownloadNew,
+		SkipHalf:         appconfig.Bool(cfg, "skip5"),
+		DelayedMinutes:   appconfig.Int(cfg, "delayedDownload"),
+		CustomEpisode:    item.CustomEpisode,
+		CustomEpisodeRE:  item.CustomEpisodeStr,
+		CustomEpisodeIdx: item.CustomEpisodeGroupIndex,
+		Coexist:          appconfig.Bool(cfg, "coexist"),
+	}
+	if item.CustomPriorityKeywordsEnable {
+		options.PriorityKeywords = item.CustomPriorityKeywords
+	} else if appconfig.Bool(cfg, "priorityKeywordsEnable") {
+		options.PriorityKeywords = appconfig.Strings(cfg, "priorityKeywords")
+	}
+	return rss.Match(resources, *item, options), nil
+}
+
+func inferRSSSubgroup(resources []model.Resource) string {
+	pattern := regexp.MustCompile(`^\[([^]]+)]`)
+	for _, resource := range resources {
+		name := strings.TrimSpace(resource.Title)
+		if match := pattern.FindStringSubmatch(name); len(match) > 1 && strings.TrimSpace(match[1]) != "" {
+			return strings.TrimSpace(match[1])
+		}
+		name = filepath.Base(name)
+		if match := pattern.FindStringSubmatch(name); len(match) > 1 && strings.TrimSpace(match[1]) != "" {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	return ""
+}
+
+var defaultSubscriptionExclude = []string{"720[Pp]", `\d-\d`, "合集", "特别篇"}
+
+// applySubscriptionDefaults is the Go equivalent of Java's createAni().
+// Source conversion endpoints must return the complete editable object: the
+// Vue form binds directly to these fields and treats missing values as
+// undefined, which makes a seemingly successful conversion look incomplete.
+func (a *App) applySubscriptionDefaults(item *model.Ani, customDownloadPath bool) {
+	if item == nil {
+		return
+	}
+	cfg := a.config.Snapshot()
+	if item.ID == "" {
+		item.ID = fmt.Sprintf("ani-%d", time.Now().UnixNano())
+	}
+	if item.ReleaseDate == "" {
+		item.ReleaseDate = time.Now().Format("2006-01-02")
+	}
+	if item.Season < 1 {
+		item.Season = 1
+	}
+	if item.StandbyRSSList == nil {
+		item.StandbyRSSList = []model.StandbyRSS{}
+	}
+	if item.Match == nil {
+		item.Match = []string{}
+	}
+	// createAni() starts with its fixed filters. RSS conversion imports the
+	// global filters in applyRSSConversionDefaults, after BgmUtil.toAni(); a
+	// direct Bangumi conversion must retain these fixed defaults.
+	item.Exclude = append([]string(nil), defaultSubscriptionExclude...)
+	item.GlobalExclude = false
+	item.CustomEpisode = appconfig.Bool(cfg, "customEpisode")
+	item.CustomEpisodeStr = appconfig.String(cfg, "customEpisodeStr")
+	item.CustomEpisodeGroupIndex = appconfig.Int(cfg, "customEpisodeGroupIndex")
+	item.Omit = true
+	item.DownloadNew = false
+	if item.NotDownload == nil {
+		item.NotDownload = []float64{}
+	}
+	if item.TMDB == nil {
+		item.TMDB = map[string]any{"id": "", "name": "", "originalName": "", "date": time.Now().Format("2006-01-02 15:04:05")}
+	}
+	item.Upload = appconfig.Bool(cfg, "upload")
+	item.Procrastinating = !item.OVA
+	item.CustomRenameTemplateEnable = false
+	item.CustomRenameTemplate = appconfig.String(cfg, "renameTemplate")
+	item.CustomPriorityKeywordsEnable = false
+	if item.CustomPriorityKeywords == nil {
+		item.CustomPriorityKeywords = []string{}
+	}
+	item.CustomUploadEnable = false
+	item.CustomUploadPathTarget = ""
+	item.Message = true
+	item.Completed = true
+	item.CustomCompleted = false
+	item.CustomCompletedPathTemplate = appconfig.String(cfg, "completedPathTemplate")
+	item.CustomTagsEnable = false
+	if item.CustomTags == nil {
+		item.CustomTags = []string{}
+	}
+	item.CustomDownloadPath = customDownloadPath
+	if path, err := a.subscriptions.DownloadPath(*item); err == nil {
+		item.CustomDownloadPathTemplate = path["downloadPath"].(string)
+	}
+}
+
+// applyRSSConversionDefaults contains the fields that AniUtil.getAni applies
+// only after the RSS source has been converted. They are deliberately kept
+// separate from createAni defaults because /getAniBySubjectId calls the latter
+// directly and Java leaves downloadNew/globalExclude at their fixed values in
+// that path.
+func (a *App) applyRSSConversionDefaults(item *model.Ani, typeName string) {
+	if item == nil {
+		return
+	}
+	cfg := a.config.Snapshot()
+	if appconfig.Bool(cfg, "importExclude") {
+		item.Exclude = appendUniqueStrings(appconfig.Strings(cfg, "exclude"), item.Exclude)
+	}
+	item.GlobalExclude = appconfig.Bool(cfg, "enabledExclude")
+	item.DownloadNew = appconfig.Bool(cfg, "downloadNew")
+	item.Type = typeName
+}
+
+func appendUniqueStrings(first, second []string) []string {
+	result := make([]string, 0, len(first)+len(second))
+	seen := make(map[string]struct{}, len(first)+len(second))
+	for _, values := range [][]string{first, second} {
+		for _, value := range values {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (a *App) enrichSubscriptionMetadata(ctx context.Context, item *model.Ani) {
+	if item == nil {
+		return
+	}
+	// Bangumi remains the authoritative fallback when TMDB is unavailable.
+	// Java formats this title even when the optional TMDB lookup fails, so a
+	// transient TMDB outage must not leave the editable form with an unclean
+	// or otherwise incomplete title.
+	bangumiFallback := a.bangumiDisplayTitle(*item, model.Metadata{})
+	cfg := a.config.Snapshot()
+	// Search with the raw Bangumi title. Formatting the title first can append
+	// the configured year (or TMDB id), which is a display concern and may make
+	// an otherwise valid TMDB search miss. Java's BgmUtil.toAni() resolves TMDB
+	// immediately after setting the raw Bangumi title, then formats the result.
+	searchTitle := strings.TrimSpace(item.Title)
+	if searchTitle == "" {
+		searchTitle = "无标题"
+	}
+	metadataClient, err := a.metadataClient()
+	if err != nil {
+		item.Title = bangumiFallback
+		return
+	}
+	value, raw, err := metadataClient.SearchTMDB(ctx, searchTitle, item.OVA)
+	if err != nil {
+		item.Title = bangumiFallback
+		return
+	}
+	item.TMDB = raw
+	item.TheMovieDBName = media.FinalTitle(value, a.config)
+	// Java always resolves and stores TMDB, but the `tmdb` switch controls
+	// whether its title replaces the Bangumi title. Other subscription fields
+	// remain sourced from Bangumi in both modes.
+	if appconfig.Bool(cfg, "tmdb") && item.TheMovieDBName != "" {
+		item.Title = item.TheMovieDBName
+	} else {
+		item.Title = a.bangumiDisplayTitle(*item, value)
+	}
+}
+
+func (a *App) bangumiDisplayTitle(item model.Ani, tmdbValue model.Metadata) string {
+	title := cleanDisplayTitle(item.Title)
+	if title == "" {
+		title = "无标题"
+	}
+	cfg := a.config.Snapshot()
+	if appconfig.Bool(cfg, "titleYear") {
+		year := tmdbValue.Year
+		if year == 0 {
+			year = dateYear(item.ReleaseDate)
+		}
+		if year > 0 {
+			title = regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`).ReplaceAllString(title, "")
+			title = fmt.Sprintf("%s (%d)", title, year)
+		}
+	}
+	if appconfig.Bool(cfg, "tmdbId") && tmdbValue.ID != "" {
+		if appconfig.Bool(cfg, "tmdbIdPlexMode") {
+			title += " {tmdb-" + tmdbValue.ID + "}"
+		} else {
+			title += " [tmdbid=" + tmdbValue.ID + "]"
+		}
+	}
+	return title
+}
+
+// cleanDisplayTitle mirrors RenameUtil.getName for titles originating from
+// Bangumi. It is intentionally applied only to display/path-safe titles; RSS
+// matching continues to use the original resource title.
+func cleanDisplayTitle(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "1/2", "½")
+	value = strings.NewReplacer(
+		"/", " ", "\\", " ", ":", "：", "?", "？", "|", "｜",
+		"*", " ", "<", " ", ">", " ", "\"", " ",
+	).Replace(value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func dateYear(value string) int {
+	if len(value) < 4 {
+		return 0
+	}
+	year, err := strconv.Atoi(value[:4])
+	if err != nil {
+		return 0
+	}
+	return year
 }
 
 func (a *App) newCoordinator() (*rss.Coordinator, error) {
@@ -738,15 +1398,11 @@ func (a *App) newCoordinator() (*rss.Coordinator, error) {
 }
 
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
-	err := a.refreshAllSubscriptions(r.Context())
-	if err != nil {
-		// Java exposes refreshAll as a best-effort background action. Keep the
-		// same successful UI contract while returning diagnostics to callers
-		// that inspect the response body.
-		a.logger.Warn("RSS refresh partially failed", "error", err)
-		writeResult(w, http.StatusOK, map[string]any{"error": err.Error()}, "已开始刷新RSS")
-		return
-	}
+	a.runBackground(func() {
+		if err := a.refreshAllSubscriptions(context.Background()); err != nil {
+			a.logger.Warn("RSS refresh partially failed", "error", err)
+		}
+	})
 	writeResult(w, http.StatusOK, nil, "已开始刷新RSS")
 }
 
@@ -770,12 +1426,11 @@ func (a *App) refreshAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅不存在")
 		return
 	}
-	err := a.refreshSubscription(r.Context(), selected)
-	if err != nil {
-		a.logger.Warn("RSS refresh failed", "subscription", selected.ID, "error", err)
-		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
-		return
-	}
+	a.runBackground(func() {
+		if err := a.refreshSubscription(context.Background(), selected); err != nil {
+			a.logger.Warn("RSS refresh failed", "subscription", selected.ID, "error", err)
+		}
+	})
 	writeResult(w, http.StatusOK, nil, "已开始刷新RSS")
 }
 
@@ -807,6 +1462,10 @@ func (a *App) previewAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	if strings.TrimSpace(item.URL) == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "RSS地址不能为空")
+		return
+	}
 	coordinator, err := a.newCoordinator()
 	if err == nil {
 		var result map[string]any
@@ -820,9 +1479,14 @@ func (a *App) previewAni(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
-	id, hash := r.URL.Query().Get("id"), r.URL.Query().Get("hash")
-	if id == "" || hash == "" {
-		writeResult(w, http.StatusInternalServerError, nil, "参数不能为空")
+	id, queryErr := requiredQuery(r, "id")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	hash, queryErr := requiredQuery(r, "hash")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
 	var selected model.Ani
@@ -867,6 +1531,16 @@ func (a *App) deleteTorrent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) torrentsInfos(w http.ResponseWriter, r *http.Request) {
+	cfg := a.config.Snapshot()
+	toolType := defaultString(appconfig.String(cfg, "downloadToolType"), "qBittorrent")
+	if strings.EqualFold(toolType, "qBittorrent") &&
+		(strings.TrimSpace(appconfig.String(cfg, "downloadToolHost")) == "" || strings.TrimSpace(appconfig.String(cfg, "downloadToolPassword")) == "") {
+		// The legacy qBittorrent adapter treats an intentionally unconfigured
+		// downloader as an empty task list. Keep that distinct from a configured
+		// downloader that is unavailable or rejects authentication.
+		writeResult(w, http.StatusOK, []model.Torrent{}, "success")
+		return
+	}
 	coordinator, err := a.newCoordinator()
 	if err == nil {
 		if err = coordinator.QB.Login(r.Context()); err == nil {
@@ -1010,8 +1684,12 @@ func (a *App) getEmbyViews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host, token := strings.TrimRight(appconfig.String(cfg, "embyHost"), "/"), appconfig.String(cfg, "embyApiKey")
-	if host == "" || token == "" {
-		writeResult(w, http.StatusInternalServerError, nil, "Emby 参数不完整")
+	if host == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "embyHost 为空")
+		return
+	}
+	if token == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "embyApiKey 为空")
 		return
 	}
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, host+"/Library/MediaFolders", nil)
@@ -1044,6 +1722,13 @@ func (a *App) embyWebHook(w http.ResponseWriter, r *http.Request) {
 	var payload map[string]any
 	if err := decodeJSON(r, &payload); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "Emby Webhook 格式异常: "+err.Error())
+		return
+	}
+	// Java treats a webhook as a no-op when Bangumi integration is disabled.
+	// Emby sends test/health payloads even in that default configuration, so
+	// they must not be rejected for lacking an event field.
+	if appconfig.String(a.config.Snapshot(), "bgmToken") == "" {
+		writeResult(w, http.StatusOK, nil, "success")
 		return
 	}
 	event := strings.ToLower(appconfig.String(payload, "event"))
@@ -1249,32 +1934,55 @@ func (a *App) scrape(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "订阅格式异常: "+err.Error())
 		return
 	}
-	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
-	service, err := a.mediaService()
-	if err == nil {
-		result, scrapeErr := service.Scrape(r.Context(), &item, force)
-		if result.Ani.ID != "" {
-			if saveErr := a.subscriptions.Set(result.Ani); scrapeErr == nil && saveErr != nil {
-				scrapeErr = saveErr
-			}
-		}
-		err = scrapeErr
+	forceText, queryErr := requiredQueryWithType(r, "force", "Boolean")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
 	}
+	force, err := strconv.ParseBool(forceText)
 	if err != nil {
-		a.logger.Warn("media scrape failed", "title", item.Title, "error", err)
+		writeResult(w, http.StatusInternalServerError, nil, "强制参数异常")
+		return
+	}
+	service, err := a.mediaService()
+	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	a.runBackground(func() {
+		result, scrapeErr := service.Scrape(context.Background(), &item, force)
+		if result.Ani.ID != "" && scrapeErr == nil {
+			if saveErr := a.subscriptions.Set(result.Ani); saveErr != nil {
+				scrapeErr = saveErr
+			}
+		}
+		if scrapeErr != nil {
+			a.logger.Warn("media scrape failed", "title", item.Title, "error", scrapeErr)
+		}
+	})
 	writeResult(w, http.StatusOK, nil, "已开始刮削 "+item.Title)
 }
 
 func (a *App) batchScrape(w http.ResponseWriter, r *http.Request) {
 	var ids []string
-	if err := decodeJSON(r, &ids); err != nil || len(ids) == 0 {
+	if err := decodeJSON(r, &ids); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "未选择订阅")
 		return
 	}
-	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	forceText, queryErr := requiredQueryWithType(r, "force", "Boolean")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	force, err := strconv.ParseBool(forceText)
+	if err != nil {
+		writeResult(w, http.StatusInternalServerError, nil, "强制参数异常")
+		return
+	}
+	if len(ids) == 0 {
+		writeResult(w, http.StatusInternalServerError, nil, "未选择订阅")
+		return
+	}
 	service, err := a.mediaService()
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
@@ -1284,27 +1992,26 @@ func (a *App) batchScrape(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		selected[id] = true
 	}
-	failures := []string{}
-	count := 0
+	selectedItems := make([]model.Ani, 0, len(ids))
 	for _, item := range a.subscriptions.Items() {
 		if !selected[item.ID] {
 			continue
 		}
-		result, scrapeErr := service.Scrape(r.Context(), &item, force)
-		if scrapeErr == nil {
-			scrapeErr = a.subscriptions.Set(result.Ani)
-		}
-		if scrapeErr != nil {
-			failures = append(failures, item.Title+": "+scrapeErr.Error())
-			continue
-		}
-		count++
+		selectedItems = append(selectedItems, item)
 	}
-	if len(failures) > 0 {
-		writeResult(w, http.StatusInternalServerError, map[string]any{"processed": count, "errors": failures}, "批量刮削部分失败")
-		return
-	}
-	writeResult(w, http.StatusOK, nil, fmt.Sprintf("已开始刮削%d个订阅", count))
+	a.runBackground(func() {
+		for index := range selectedItems {
+			item := &selectedItems[index]
+			result, scrapeErr := service.Scrape(context.Background(), item, force)
+			if scrapeErr == nil && result.Ani.ID != "" {
+				scrapeErr = a.subscriptions.Set(result.Ani)
+			}
+			if scrapeErr != nil {
+				a.logger.Warn("media scrape failed", "title", item.Title, "error", scrapeErr)
+			}
+		}
+	})
+	writeResult(w, http.StatusOK, nil, fmt.Sprintf("已开始刮削%d个订阅", len(selectedItems)))
 }
 
 func (a *App) refreshCover(w http.ResponseWriter, r *http.Request) {
@@ -1317,10 +2024,6 @@ func (a *App) refreshCover(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		var cover string
 		cover, err = service.RefreshCover(r.Context(), item.Image, true)
-		if err == nil && item.ID != "" {
-			item.Cover = cover
-			err = a.subscriptions.Set(item)
-		}
 		if err == nil {
 			writeResult(w, http.StatusOK, cover, "success")
 			return
@@ -1330,6 +2033,14 @@ func (a *App) refreshCover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) upload(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		if isRequestTooLarge(err) {
+			writeResult(w, http.StatusRequestEntityTooLarge, nil, "文件过大")
+		} else {
+			writeResult(w, http.StatusInternalServerError, nil, "Content-Type is not supported")
+		}
+		return
+	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "文件为空")
@@ -1346,11 +2057,8 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := fmt.Sprintf("%x", md5.Sum(data))
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext == "" || len(ext) > 10 {
-		ext = ".bin"
-	}
-	relative := filepath.ToSlash(filepath.Join(string(name[0]), name+ext))
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(header.Filename)), ".")
+	relative := filepath.ToSlash(filepath.Join(string(name[0]), name+"."+ext))
 	target := filepath.Join(a.configDir, "files", relative)
 	if err := writeAtomic(target, data); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
@@ -1360,6 +2068,14 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) uploadAndRead(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		if isRequestTooLarge(err) {
+			writeResult(w, http.StatusRequestEntityTooLarge, nil, "文件过大")
+		} else {
+			writeResult(w, http.StatusInternalServerError, nil, "Content-Type is not supported")
+		}
+		return
+	}
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "文件为空")
@@ -1375,6 +2091,14 @@ func (a *App) uploadAndRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) uploadAndReadBase64(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		if isRequestTooLarge(err) {
+			writeResult(w, http.StatusRequestEntityTooLarge, nil, "文件过大")
+		} else {
+			writeResult(w, http.StatusInternalServerError, nil, "Content-Type is not supported")
+		}
+		return
+	}
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "文件为空")
@@ -1431,17 +2155,22 @@ func (a *App) getThemoviedbName(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	if strings.TrimSpace(input.TMDBID) == "" && strings.TrimSpace(input.Title) == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "TmdbId 或 标题 不能为空")
+		return
+	}
 	client, err := a.metadataClient()
 	if err == nil {
-		item := model.Ani{Title: input.Title, OVA: input.OVA}
-		if input.TMDBID != "" {
-			item.TMDB = map[string]any{"id": input.TMDBID}
-		}
 		var value model.Metadata
 		var raw map[string]any
-		value, raw, err = client.Lookup(r.Context(), item)
+		value, raw, err = client.LookupTMDB(r.Context(), input.Title, input.TMDBID, input.OVA)
 		if err == nil {
-			writeResult(w, http.StatusOK, map[string]any{"tmdb": raw, "themoviedbName": media.FinalTitle(value, a.config)}, "获取 TMDB 成功")
+			name := media.FinalTitle(value, a.config)
+			if name == "" {
+				writeResult(w, http.StatusInternalServerError, nil, "获取 TMDB 失败")
+				return
+			}
+			writeResult(w, http.StatusOK, map[string]any{"tmdb": raw, "themoviedbName": name}, "获取 TMDB 成功")
 			return
 		}
 	}
@@ -1457,6 +2186,10 @@ func (a *App) getThemoviedbGroup(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	if item.TMDB != nil {
 		id = appconfig.String(item.TMDB, "id")
+	}
+	if strings.TrimSpace(id) == "" {
+		writeResult(w, http.StatusInternalServerError, nil, "tmdb is null")
+		return
 	}
 	client, err := a.metadataClient()
 	if err == nil {
@@ -1506,24 +2239,52 @@ func (a *App) playList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) getSubtitles(w http.ResponseWriter, r *http.Request) {
-	filename, err := decodeBase64Param(r.URL.Query().Get("filename"))
+	encodedFilename, queryErr := requiredQuery(r, "filename")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	filename, err := decodeBase64Param(encodedFilename)
 	if err == nil {
 		filename = a.resolveFilePath(filename)
-		if _, statErr := os.Stat(filename); statErr == nil && media.IsVideo(filename) && a.allowedMediaPath(filename) {
-			subtitles := media.SubtitlesFor(filename)
-			if embedded, embeddedErr := media.EmbeddedSubtitles(filename); embeddedErr == nil {
-				subtitles = append(subtitles, embedded...)
-			}
-			writeResult(w, http.StatusOK, subtitles, "success")
+		// The legacy endpoint is specifically for MKV's embedded subtitle
+		// tracks. Sidecar subtitles are assembled by playList and must not be
+		// duplicated here. Java also treats a missing extension and non-MKV
+		// paths as a successful empty result.
+		ext := strings.ToLower(filepath.Ext(filename))
+		if ext == "" || ext != ".mkv" {
+			writeResult(w, http.StatusOK, []model.SubtitleInfo{}, "success")
 			return
 		}
-		err = errors.New("视频文件不存在")
+		if _, statErr := os.Stat(filename); statErr == nil && media.IsVideo(filename) && a.allowedMediaPath(filename) {
+			// Sidecar subtitles are deliberately excluded here. Java exposes
+			// them from playList; this endpoint is only the embedded-track
+			// lookup used by PlayStartView.
+			embedded, embeddedErr := media.EmbeddedSubtitles(filename)
+			if embeddedErr == nil {
+				writeResult(w, http.StatusOK, embedded, "success")
+				return
+			}
+			// Java's EBML reader returns an empty successful result when the
+			// file header is not readable. Preserve that behavior for a
+			// present MKV instead of turning a corrupt media file into a
+			// page-level error.
+			writeResult(w, http.StatusOK, []model.SubtitleInfo{}, "success")
+			return
+		} else {
+			err = errors.New("视频文件不存在")
+		}
 	}
 	writeResult(w, http.StatusInternalServerError, nil, err.Error())
 }
 
 func (a *App) file(w http.ResponseWriter, r *http.Request) {
-	filename, err := decodeBase64Param(r.URL.Query().Get("filename"))
+	encodedFilename, queryErr := requiredQuery(r, "filename")
+	if queryErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
+		return
+	}
+	filename, err := decodeBase64Param(encodedFilename)
 	filename = a.resolveFilePath(filename)
 	if err != nil || !a.allowedMediaPath(filename) {
 		writeResult(w, http.StatusForbidden, nil, "不允许访问")
@@ -1538,22 +2299,69 @@ func (a *App) file(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	w.Header().Set("Content-Disposition", `inline; filename="`+url.PathEscape(filepath.Base(filename))+`"`)
-	w.Header().Set("Content-Type", contentType)
-	if strings.HasPrefix(contentType, "video/") {
-		w.Header().Set("Accept-Ranges", "bytes")
-	} else if info.Size() <= 3*1024*1024 {
-		// Match the Java file endpoint: small non-video assets are safe to cache
-		// for a month, while large assets remain uncached by default.
-		w.Header().Set("Cache-Control", "public, max-age=2592000")
-	}
 	file, openErr := os.Open(filename)
 	if openErr != nil {
 		writeResult(w, http.StatusNotFound, nil, "文件不存在")
 		return
 	}
 	defer file.Close()
-	http.ServeContent(w, r, filepath.Base(filename), info.ModTime(), file)
+	w.Header().Set("Content-Disposition", `inline; filename="`+url.PathEscape(filepath.Base(filename))+`"`)
+	w.Header().Set("Content-Type", contentType)
+	if strings.HasPrefix(contentType, "video/") {
+		if start, end, ok, rangeErr := javaRange(r.Header.Get("Range"), info.Size()); rangeErr != nil {
+			writeResult(w, http.StatusInternalServerError, nil, "Range 参数异常")
+			return
+		} else if ok {
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size()))
+			w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			if _, seekErr := file.Seek(start, io.SeekStart); seekErr == nil {
+				_, _ = io.CopyN(w, file, end-start+1)
+			}
+			return
+		}
+	} else if info.Size() <= 3*1024*1024 {
+		// Match the Java file endpoint: small non-video assets are safe to cache
+		// for a month, while large assets remain uncached by default.
+		w.Header().Set("Cache-Control", "public, max-age=2592000")
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	_, _ = io.Copy(w, file)
+}
+
+// javaRange parses the deliberately small Range dialect implemented by the
+// legacy FileController. In particular, a suffix range such as bytes=-5 is
+// interpreted as bytes 0-5 there (rather than as the last five bytes), and a
+// trailing dash leaves the default end at EOF.
+func javaRange(value string, size int64) (start, end int64, present bool, err error) {
+	if strings.TrimSpace(value) == "" || !strings.HasPrefix(value, "bytes=") {
+		return 0, 0, false, nil
+	}
+	if size < 0 {
+		return 0, 0, false, errors.New("文件大小异常")
+	}
+	start, end = 0, size-1
+	parts := strings.Split(strings.TrimPrefix(value, "bytes="), "-")
+	for len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+		start, err = strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+	if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+		end, err = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+	if start < 0 || end < 0 || end < start {
+		return 0, 0, false, errors.New("Range 范围异常")
+	}
+	return start, end, true, nil
 }
 
 func (a *App) resolveFilePath(path string) string {
@@ -1618,6 +2426,19 @@ func sourceError(err error) string {
 	}
 	return err.Error()
 }
+
+func requiredQuery(r *http.Request, name string) (string, error) {
+	return requiredQueryWithType(r, name, "String")
+}
+
+func requiredQueryWithType(r *http.Request, name, javaType string) (string, error) {
+	values, ok := r.URL.Query()[name]
+	if !ok || len(values) == 0 {
+		return "", fmt.Errorf("Required request parameter '%s' for method parameter type %s is not present", name, javaType)
+	}
+	return values[0], nil
+}
+
 func defaultString(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
@@ -1643,21 +2464,47 @@ func (a *App) protected(handler http.HandlerFunc) http.Handler {
 func decodeJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 16<<20))
 	decoder.UseNumber()
-	if err := decoder.Decode(target); err != nil {
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
 		return err
 	}
-	return nil
+	// Spring's required @RequestBody rejects both an empty body and the JSON
+	// literal null before the controller method is invoked. encoding/json
+	// otherwise accepts null into a pointer/map/struct target, which would let
+	// some Go handlers incorrectly take their successful empty-input path.
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("request body is required")
+	}
+	bodyDecoder := json.NewDecoder(bytes.NewReader(raw))
+	bodyDecoder.UseNumber()
+	return bodyDecoder.Decode(target)
 }
 
 func writeResult(w http.ResponseWriter, code int, data any, message string) {
 	payload := map[string]any{"code": code, "message": message, "t": time.Now().UnixMilli()}
-	if data != nil {
+	// Gson does not serialize null fields by default. This matters for the
+	// Result<Void> responses used by most command endpoints, whose legacy JSON
+	// envelope has no data key at all.
+	if !isNilResultData(data) {
 		payload["data"] = data
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json;charset=UTF-8")
 	// Spring's ResultException is serialized as a JSON result while retaining
 	// its result code; the browser consumes code rather than transport status.
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func isNilResultData(data any) bool {
+	if data == nil {
+		return true
+	}
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func ConfigDirFromEnv() string {

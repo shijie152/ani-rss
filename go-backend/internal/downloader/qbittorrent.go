@@ -355,6 +355,15 @@ func (q *QBittorrent) AddTags(ctx context.Context, hash, tags string) error {
 	return q.postForm(ctx, "/api/v2/torrents/addTags", url.Values{"hashes": []string{hash}, "tags": []string{tags}})
 }
 func (q *QBittorrent) SetSavePath(ctx context.Context, hash, path string) error {
+	// qBittorrent's automatic torrent management can immediately move a task
+	// back to its category-managed path. Java disables it before changing the
+	// save path, so keep the two requests ordered here as well.
+	if err := q.postForm(ctx, "/api/v2/torrents/setAutoManagement", url.Values{
+		"hashes": []string{hash},
+		"enable": []string{"false"},
+	}); err != nil {
+		return err
+	}
 	return q.postForm(ctx, "/api/v2/torrents/setSavePath", url.Values{"id": []string{hash}, "path": []string{path}})
 }
 func (q *QBittorrent) Start(ctx context.Context, hash string) error {

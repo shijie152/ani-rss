@@ -39,6 +39,20 @@ func TestParseAndMatchRSSRules(t *testing.T) {
 	}
 }
 
+func TestParseRSSHandlesEmptyMagnetInfoHash(t *testing.T) {
+	feed := `<rss><channel><item><title>Demo</title><link>000000000000000Btih:</link></item></channel></rss>`
+	items, err := rss.Parse([]byte(feed), "Group", "https://example.test/feed.xml")
+	if err != nil {
+		t.Fatalf("parse RSS: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed items = %#v, want one item", items)
+	}
+	if items[0].InfoHash != "" {
+		t.Fatalf("info hash = %q, want empty for a magnet without a hash", items[0].InfoHash)
+	}
+}
+
 func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 	var adds int
 	qb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

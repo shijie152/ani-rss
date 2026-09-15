@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,11 @@ type Client struct {
 	Config     model.Config
 	HTTPClient *http.Client
 }
+
+// Keep the public fallback used by the Java release. Users can still replace
+// it with their own key in settings, while a fresh installation retains the
+// legacy behavior of resolving TMDB during subscription creation.
+const defaultTMDBAPIKey = "450e4f651e1c93e31383e20f8e731e5f"
 
 func New(config model.Config, client *http.Client) *Client {
 	if client == nil {
@@ -59,6 +65,20 @@ func (c *Client) Lookup(ctx context.Context, ani model.Ani) (model.Metadata, map
 }
 
 func (c *Client) SearchTMDB(ctx context.Context, title string, ova bool) (model.Metadata, map[string]any, error) {
+	return c.searchTMDB(ctx, title, ova, 0)
+}
+
+// LookupTMDB implements the standalone /getThemoviedbName operation. Unlike
+// subscription scraping, this endpoint is explicitly TMDB-only: the global
+// `tmdb` switch must not turn a title lookup into a Bangumi fallback.
+func (c *Client) LookupTMDB(ctx context.Context, title, id string, ova bool) (model.Metadata, map[string]any, error) {
+	if strings.TrimSpace(id) != "" {
+		return c.lookupTMDBID(ctx, strings.TrimSpace(id), ova, 0)
+	}
+	title = renameDelForLookup(title)
+	if strings.TrimSpace(title) == "" {
+		return model.Metadata{}, nil, errors.New("TmdbId 或 标题 不能为空")
+	}
 	return c.searchTMDB(ctx, title, ova, 0)
 }
 
@@ -202,9 +222,11 @@ func (c *Client) tmdbBase() string {
 
 func (c *Client) tmdbQuery() url.Values {
 	query := url.Values{}
-	if key := stringValue(c.Config["tmdbApiKey"]); key != "" {
-		query.Set("api_key", key)
+	key := stringValue(c.Config["tmdbApiKey"])
+	if key == "" {
+		key = defaultTMDBAPIKey
 	}
+	query.Set("api_key", key)
 	if language := stringValue(c.Config["tmdbLanguage"]); language != "" {
 		query.Set("language", language)
 	}
@@ -333,4 +355,11 @@ func stripIdentifiers(value string) string {
 		}
 	}
 	return value
+}
+
+func renameDelForLookup(value string) string {
+	value = strings.TrimSpace(value)
+	value = regexp.MustCompile(` ?(\[tmdbid=\d+\]|\{tmdb-\d+\})`).ReplaceAllString(value, "")
+	value = regexp.MustCompile(` ?\((?:19|20)\d{2}\)`).ReplaceAllString(value, "")
+	return strings.TrimSpace(value)
 }

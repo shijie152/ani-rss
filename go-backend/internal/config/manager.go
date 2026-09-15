@@ -79,6 +79,10 @@ func (m *Manager) Reload() error {
 // implementation details of the Go runtime.
 func (m *Manager) PublicSnapshot() model.Config {
 	cfg := m.Snapshot()
+	// runtimeOwnership is an internal cutover/locking detail. It is persisted
+	// so the gateway can keep migration state, but Java never exposed it from
+	// /api/config and the UI has no field for it.
+	delete(cfg, "runtimeOwnership")
 	if login, ok := cfg["login"].(map[string]any); ok {
 		login["password"] = ""
 	}
@@ -151,6 +155,11 @@ func Normalize(cfg model.Config) error {
 			cfg[key] = path
 		}
 	}
+	if template, ok := cfg["notificationTemplate"].(string); ok {
+		// ConfigUtil.format() trims the global template before it is exposed.
+		cfg["notificationTemplate"] = strings.TrimSpace(template)
+	}
+	normalizeNotificationConfigs(cfg)
 	if enabled, _ := cfg["proxy"].(bool); enabled {
 		host := stringValue(cfg["proxyHost"])
 		port := intValue(cfg["proxyPort"])
@@ -176,6 +185,59 @@ func Normalize(cfg model.Config) error {
 		}
 	}
 	return nil
+}
+
+// normalizeNotificationConfigs fills fields omitted by older notification
+// configuration files. Java's ConfigUtil.format() copies non-null fields from
+// NotificationConfig.createNotificationConfig() with override=false; merging
+// the defaults underneath each object is the equivalent JSON operation.
+func normalizeNotificationConfigs(cfg model.Config) {
+	raw, exists := cfg["notificationConfigList"]
+	if !exists || raw == nil {
+		cfg["notificationConfigList"] = []any{}
+		return
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		if typed, typedOK := raw.([]map[string]any); typedOK {
+			list = make([]any, 0, len(typed))
+			for _, item := range typed {
+				list = append(list, item)
+			}
+		} else {
+			return
+		}
+	}
+	defaults := defaultNotificationConfig()
+	normalized := make([]any, 0, len(list))
+	for _, rawItem := range list {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			normalized = append(normalized, rawItem)
+			continue
+		}
+		normalized = append(normalized, merge(defaults, item))
+	}
+	cfg["notificationConfigList"] = normalized
+}
+
+func defaultNotificationConfig() model.Config {
+	return model.Config{
+		"enable": true, "retry": 3, "sort": 10, "comment": "", "notificationTemplate": "${notification}",
+		"notificationType": "TELEGRAM", "statusList": []any{"DOWNLOAD_START", "OMIT", "ERROR"},
+		"mailSMTPHost": "smtp.qq.com", "mailSMTPPort": 465, "mailFrom": "", "mailPassword": "", "mailSSLEnable": true, "mailTLSEnable": false, "mailAddressee": "", "mailImage": true,
+		"serverChanType": "SERVER_CHAN", "serverChanSendKey": "", "serverChan3ApiUrl": "", "serverChanTitleAction": true,
+		"telegramBotToken": "", "telegramChatId": "", "telegramTopicId": -1, "telegramApiHost": "https://api.telegram.org", "telegramImage": true, "telegramFormat": "",
+		"webHookMethod": "POST", "webHookUrl": "", "webHookHeader": "", "webHookBody": "",
+		// embyHost is intentionally omitted here. Java's default
+		// NotificationConfig leaves it null and Gson omits null fields.
+		// Existing non-empty embyHost values are still preserved by merge.
+		"embyRefresh": false, "embyApiKey": "", "embyRefreshViewIds": []any{}, "embyDelayed": 0,
+		"shell": "", "aliveLimit": 10,
+		"fileMoveTarget": "/CD2/115/Media/番剧/${title}/Season ${season}", "fileMoveOvaTarget": "/CD2/115/Media/剧场版/${title}", "fileMoveDeleteOldEpisode": false, "fileMoveCopyModel": false,
+		"openListUploadHost": "http://127.0.0.1:5244", "openListUploadApiKey": "", "openListUploadPath": "/115/Media/番剧/${title}/Season ${season}", "openListUploadOvaPath": "/115/Media/剧场版/${title}", "openListUploadDeleteLocalFile": false, "openListUploadDeleteOldEpisode": false,
+		"barkServerUrl": "https://api.day.app", "barkDeviceKeys": []any{}, "barkGroup": "ani-rss", "barkUseMarkdown": false, "barkLevel": "active", "barkVolume": 5,
+	}
 }
 
 func ProxyURL(cfg model.Config) (*url.URL, error) {

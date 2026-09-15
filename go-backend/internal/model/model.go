@@ -35,59 +35,60 @@ type StandbyRSS struct {
 type Ani struct {
 	Sort                         int            `json:"sort,omitempty"`
 	ID                           string         `json:"id"`
-	MikanTitle                   string         `json:"mikanTitle,omitempty"`
+	MikanTitle                   string         `json:"mikanTitle"`
 	URL                          string         `json:"url"`
 	Exists                       bool           `json:"exists,omitempty"`
-	StandbyRSSList               []StandbyRSS   `json:"standbyRssList,omitempty"`
+	StandbyRSSList               []StandbyRSS   `json:"standbyRssList"`
 	Title                        string         `json:"title"`
-	JPTitle                      string         `json:"jpTitle,omitempty"`
-	Offset                       int            `json:"offset,omitempty"`
-	ReleaseDate                  string         `json:"releaseDate,omitempty"`
+	JPTitle                      string         `json:"jpTitle"`
+	Offset                       int            `json:"offset"`
+	ReleaseDate                  string         `json:"releaseDate"`
 	Year                         int            `json:"year,omitempty"`
 	Month                        int            `json:"month,omitempty"`
 	Date                         int            `json:"date,omitempty"`
 	WeekLabel                    string         `json:"weekLabel,omitempty"`
-	Season                       int            `json:"season,omitempty"`
-	Cover                        string         `json:"cover,omitempty"`
-	Image                        string         `json:"image,omitempty"`
-	Subgroup                     string         `json:"subgroup,omitempty"`
-	Match                        []string       `json:"match,omitempty"`
-	Exclude                      []string       `json:"exclude,omitempty"`
-	GlobalExclude                bool           `json:"globalExclude,omitempty"`
-	OVA                          bool           `json:"ova,omitempty"`
+	Season                       int            `json:"season"`
+	Cover                        string         `json:"cover"`
+	Image                        string         `json:"image"`
+	Subgroup                     string         `json:"subgroup"`
+	Match                        []string       `json:"match"`
+	Exclude                      []string       `json:"exclude"`
+	GlobalExclude                bool           `json:"globalExclude"`
+	OVA                          bool           `json:"ova"`
 	Pinyin                       string         `json:"pinyin,omitempty"`
 	PinyinInitials               string         `json:"pinyinInitials,omitempty"`
 	Enable                       bool           `json:"enable"`
-	CurrentEpisodeNumber         int            `json:"currentEpisodeNumber,omitempty"`
-	TotalEpisodeNumber           int            `json:"totalEpisodeNumber,omitempty"`
-	TheMovieDBName               string         `json:"themoviedbName,omitempty"`
-	Type                         string         `json:"type,omitempty"`
-	BGMURL                       string         `json:"bgmUrl,omitempty"`
-	CustomDownloadPath           bool           `json:"customDownloadPath,omitempty"`
-	CustomDownloadPathTemplate   string         `json:"customDownloadPathTemplate,omitempty"`
-	Score                        float64        `json:"score,omitempty"`
-	CustomEpisode                bool           `json:"customEpisode,omitempty"`
-	CustomEpisodeStr             string         `json:"customEpisodeStr,omitempty"`
-	CustomEpisodeGroupIndex      int            `json:"customEpisodeGroupIndex,omitempty"`
-	Omit                         bool           `json:"omit,omitempty"`
-	DownloadNew                  bool           `json:"downloadNew,omitempty"`
-	NotDownload                  []float64      `json:"notDownload,omitempty"`
-	TMDB                         map[string]any `json:"tmdb,omitempty"`
-	Upload                       bool           `json:"upload,omitempty"`
-	Procrastinating              bool           `json:"procrastinating,omitempty"`
-	CustomRenameTemplateEnable   bool           `json:"customRenameTemplateEnable,omitempty"`
-	CustomRenameTemplate         string         `json:"customRenameTemplate,omitempty"`
-	CustomPriorityKeywordsEnable bool           `json:"customPriorityKeywordsEnable,omitempty"`
-	CustomPriorityKeywords       []string       `json:"customPriorityKeywords,omitempty"`
-	LastDownloadTime             int64          `json:"lastDownloadTime,omitempty"`
-	CustomUploadEnable           bool           `json:"customUploadEnable,omitempty"`
-	CustomUploadPathTarget       string         `json:"customUploadPathTarget,omitempty"`
-	Message                      bool           `json:"message,omitempty"`
-	Completed                    bool           `json:"completed,omitempty"`
-	CustomCompleted              bool           `json:"customCompleted,omitempty"`
-	CustomCompletedPathTemplate  string         `json:"customCompletedPathTemplate,omitempty"`
-	CustomTagsEnable             bool           `json:"customTagsEnable,omitempty"`
-	CustomTags                   []string       `json:"customTags,omitempty"`
+	CurrentEpisodeNumber         int            `json:"currentEpisodeNumber"`
+	TotalEpisodeNumber           int            `json:"totalEpisodeNumber"`
+	TheMovieDBName               string         `json:"themoviedbName"`
+	Type                         string         `json:"type"`
+	BGMURL                       string         `json:"bgmUrl"`
+	CustomDownloadPath           bool           `json:"customDownloadPath"`
+	CustomDownloadPathTemplate   string         `json:"customDownloadPathTemplate"`
+	Score                        float64        `json:"score"`
+	CustomEpisode                bool           `json:"customEpisode"`
+	CustomEpisodeStr             string         `json:"customEpisodeStr"`
+	CustomEpisodeGroupIndex      int            `json:"customEpisodeGroupIndex"`
+	Omit                         bool           `json:"omit"`
+	DownloadNew                  bool           `json:"downloadNew"`
+	NotDownload                  []float64      `json:"notDownload"`
+	TMDB                         map[string]any `json:"tmdb"`
+	Upload                       bool           `json:"upload"`
+	Procrastinating              bool           `json:"procrastinating"`
+	CustomRenameTemplateEnable   bool           `json:"customRenameTemplateEnable"`
+	CustomRenameTemplate         string         `json:"customRenameTemplate"`
+	CustomPriorityKeywordsEnable bool           `json:"customPriorityKeywordsEnable"`
+	CustomPriorityKeywords       []string       `json:"customPriorityKeywords"`
+	LastDownloadTime             int64          `json:"lastDownloadTime"`
+	CustomUploadEnable           bool           `json:"customUploadEnable"`
+	CustomUploadPathTarget       string         `json:"customUploadPathTarget"`
+	Message                      bool           `json:"message"`
+	Completed                    bool           `json:"completed"`
+	CustomCompleted              bool           `json:"customCompleted"`
+	CustomCompletedPathTemplate  string         `json:"customCompletedPathTemplate"`
+	CustomTagsEnable             bool           `json:"customTagsEnable"`
+	CustomTags                   []string       `json:"customTags"`
+	present                      map[string]bool
 }
 
 // UnmarshalJSON accepts both the current array form and the legacy UI's
@@ -97,6 +98,10 @@ func (a *Ani) UnmarshalJSON(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
+	}
+	present := make(map[string]bool, len(fields))
+	for key := range fields {
+		present[key] = true
 	}
 	match := fields["match"]
 	delete(fields, "match")
@@ -121,9 +126,16 @@ func (a *Ani) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
+	value.present = present
 	*a = Ani(value)
 	return nil
 }
+
+// FieldPresent reports whether a JSON-decoded subscription explicitly
+// contained the named field. It lets startup migration distinguish an old
+// record that omitted a boolean/number from a current record that explicitly
+// set it to false/zero. Values created in Go code intentionally report false.
+func (a Ani) FieldPresent(name string) bool { return a.present != nil && a.present[name] }
 
 type Item struct {
 	Title         string     `json:"title,omitempty"`

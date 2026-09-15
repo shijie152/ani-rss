@@ -21,12 +21,12 @@ import (
 
 func TestManagementRoutesBackupWebUIICSAndCache(t *testing.T) {
 	root := t.TempDir()
-	app, err := backend.New(backend.Options{ConfigDir: root, Version: "1.2.3", OwnershipDomains: []string{"runtime", "subscriptions"}})
+	app, err := backend.New(backend.Options{ConfigDir: root, Version: "1.2.3", OwnershipDomains: []string{"runtime", "subscriptions", "media"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	server := httptest.NewServer(gateway.New(gateway.Config{ConfigDirectory: root, GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions"}}))
+	server := httptest.NewServer(gateway.New(gateway.Config{ConfigDirectory: root, GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "media"}}))
 	defer server.Close()
 	token := login(t, server.URL)
 	item := model.Ani{ID: "calendar", Title: "Calendar Demo", URL: "https://example.test/calendar", BGMURL: "https://bgm.tv/subject/42", ReleaseDate: "2026-09-14", Season: 1, Enable: true, Cover: "cover.png"}
@@ -69,6 +69,10 @@ func TestManagementRoutesBackupWebUIICSAndCache(t *testing.T) {
 
 	backup := get(t, server.URL+"/api/exportConfig", token)
 	backupData, err := io.ReadAll(backup.Body)
+	if got := backup.Header.Get("Content-Disposition"); got != `inline; filename="ani-rss.backup.1.2.3.zip"` {
+		backup.Body.Close()
+		t.Fatalf("export content disposition = %q", got)
+	}
 	backup.Body.Close()
 	if err != nil || backup.StatusCode != http.StatusOK {
 		t.Fatalf("export status=%d err=%v", backup.StatusCode, err)
@@ -144,6 +148,72 @@ func TestManagementRoutesBackupWebUIICSAndCache(t *testing.T) {
 	}
 }
 
+func TestManagementAndRuntimeResponsesMatchJavaDefaults(t *testing.T) {
+	root := t.TempDir()
+	app, err := backend.New(backend.Options{ConfigDir: root, Version: "1.2.3", OwnershipDomains: []string{"runtime", "subscriptions", "media"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(gateway.New(gateway.Config{ConfigDirectory: root, GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "media"}}))
+	defer server.Close()
+	token := login(t, server.URL)
+
+	config := callJSON(t, server.URL+"/api/config", token, nil)
+	configData, ok := config["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("config data = %#v", config)
+	}
+	if _, present := configData["runtimeOwnership"]; present {
+		t.Fatalf("internal runtime ownership leaked through config API: %#v", configData["runtimeOwnership"])
+	}
+
+	customJS := get(t, server.URL+"/api/custom.js", "")
+	customJS.Body.Close()
+	if got := customJS.Header.Get("Content-Type"); got != "application/javascript;charset=utf-8" {
+		t.Fatalf("custom JS content type = %q", got)
+	}
+
+	logs := callJSON(t, server.URL+"/api/logs", token, nil)
+	if got, ok := logs["data"].([]any); !ok || len(got) == 0 {
+		t.Fatalf("empty logs data = %#v", logs)
+	}
+
+	cache := callJSON(t, server.URL+"/api/clearCache", token, nil)
+	if cache["message"] != "清理完成, 共清理 0.00 B" {
+		t.Fatalf("empty cache response = %#v", cache)
+	}
+
+	trackers := callJSON(t, server.URL+"/api/trackersUpdate", token, map[string]any{})
+	if trackers["message"] != "Trackers更新地址 为空" {
+		t.Fatalf("empty trackers response = %#v", trackers)
+	}
+
+	for _, path := range []string{"/api/importConfig", "/api/webui/upload", "/api/upload", "/api/uploadAndRead", "/api/uploadAndReadToBase64"} {
+		response := postRaw(t, server.URL+path, token, "", "")
+		payload := decodeResponse(t, response)
+		if payload["message"] != "Content-Type is not supported" {
+			t.Errorf("%s empty multipart response = %#v", path, payload)
+		}
+	}
+
+	webUIUpdate := callJSON(t, server.URL+"/api/webui/getUpdate", token, nil)
+	if webUIUpdate["code"] != float64(http.StatusInternalServerError) || webUIUpdate["message"] != "无 WebUI 更新" {
+		t.Fatalf("webui update response = %#v", webUIUpdate)
+	}
+
+	emby := callJSON(t, server.URL+"/api/getEmbyViews", token, map[string]any{})
+	if emby["message"] != "embyHost 为空" {
+		t.Fatalf("empty Emby response = %#v", emby)
+	}
+
+	calendar := get(t, server.URL+"/api/calendar.ics", token)
+	calendar.Body.Close()
+	if got := calendar.Header.Get("Content-Type"); got != "text/calendar;charset=UTF-8" {
+		t.Fatalf("calendar content type = %q", got)
+	}
+}
+
 func TestTrackerUpdateFetchesPlainTextAndUpdatesQBPreferences(t *testing.T) {
 	var updated atomic.Int32
 	var trackerBody string
@@ -183,6 +253,35 @@ func TestTrackerUpdateFetchesPlainTextAndUpdatesQBPreferences(t *testing.T) {
 	if response["code"] != float64(http.StatusOK) || updated.Load() != 1 || !strings.Contains(trackerBody, "tracker.one") || !strings.Contains(trackerBody, "tracker.two") {
 		t.Fatalf("tracker update=%#v calls=%d body=%s", response, updated.Load(), trackerBody)
 	}
+}
+
+func postRaw(t *testing.T, target, token, contentType, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		request.Header.Set("Authorization", token)
+	}
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func decodeResponse(t *testing.T, response *http.Response) map[string]any {
+	t.Helper()
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
 
 func makeZip(t *testing.T, files map[string]string) []byte {

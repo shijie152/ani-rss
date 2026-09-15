@@ -62,14 +62,14 @@ func TestGatewayServesRegisteredRoutesAndReturnsJSON404ForUnknownAPI(t *testing.
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
+	if response.StatusCode != http.StatusOK {
 		t.Fatalf("unknown route status = %d", response.StatusCode)
 	}
 	var payload map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["code"] != float64(http.StatusNotFound) || payload["message"] == "" {
+	if payload["code"] != float64(http.StatusNotFound) || payload["message"] != "404 Not Found !" {
 		t.Fatalf("unknown route payload = %#v", payload)
 	}
 }
@@ -93,8 +93,15 @@ func TestGatewayCanDisableGoDomainWithoutSecondaryRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
+	if response.StatusCode != http.StatusOK {
 		t.Fatalf("disabled route status = %d", response.StatusCode)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["code"] != float64(http.StatusNotFound) || payload["message"] != "404 Not Found !" {
+		t.Fatalf("disabled route payload = %#v", payload)
 	}
 }
 
