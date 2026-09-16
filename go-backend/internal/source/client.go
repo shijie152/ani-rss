@@ -26,6 +26,13 @@ type Options struct {
 	AniBTHost       string
 	AnimeGardenHost string
 	BangumiAPI      string
+	// Cache is shared by clients created for separate HTTP requests. The
+	// backend creates a new Client per request so configuration snapshots stay
+	// current; the cache keeps upstream responses reusable across those clients.
+	Cache *Cache
+	// Background schedules stale-while-revalidate work. It is optional for
+	// standalone source-client users and tests.
+	Background func(func())
 	// BGMCoverURL is the optional cache endpoint used by the legacy
 	// AnimeGarden page to fill Bangumi covers. It is injected by the
 	// application so source-client tests do not need a live cache service.
@@ -42,6 +49,8 @@ type Client struct {
 	httpClient                                                *http.Client
 	subscriptions                                             func() []model.Ani
 	retries                                                   int
+	cache                                                     *Cache
+	background                                                func(func())
 }
 
 func New(options Options) *Client {
@@ -63,7 +72,61 @@ func New(options Options) *Client {
 		httpClient:    httpClient,
 		subscriptions: options.Subscriptions,
 		retries:       retries,
+		cache:         options.Cache,
+		background:    options.Background,
 	}
+}
+
+func (c *Client) cachedJSON(key string, freshFor, staleFor time.Duration, loader func() (any, error)) (any, error) {
+	load := func() ([]byte, error) {
+		value, err := loader()
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(value)
+	}
+	if c.cache == nil {
+		return loader()
+	}
+	if raw, state := c.cache.lookup(key, freshFor, staleFor); state != cacheMiss {
+		var value any
+		if err := json.Unmarshal(raw, &value); err == nil {
+			if state == cacheStale {
+				_ = c.cache.refresh(key, load, c.background)
+			}
+			return value, nil
+		}
+	}
+	raw, err := c.cache.load(key, load)
+	if err != nil {
+		return nil, err
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("decode cached source response: %w", err)
+	}
+	return value, nil
+}
+
+func mapValue(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
+}
+
+func mapListValue(value any) []map[string]any {
+	switch values := value.(type) {
+	case []map[string]any:
+		return values
+	case []any:
+		result := make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			if item, ok := value.(map[string]any); ok {
+				result = append(result, item)
+			}
+		}
+		return result
+	}
+	return []map[string]any{}
 }
 
 func (c *Client) Mikan(text string, season map[string]any) (map[string]any, error) {
@@ -74,11 +137,18 @@ func (c *Client) Mikan(text string, season map[string]any) (map[string]any, erro
 	if match := regexp.MustCompile(`^id: ([0-9]+)$`).FindStringSubmatch(trimmedText); len(match) == 2 {
 		id := match[1]
 		target := c.mikanHost + "/Home/Bangumi/" + url.PathEscape(id)
-		body, err := c.get(target)
-		if err != nil {
-			return nil, err
+		value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
+			body, getErr := c.get(target)
+			if getErr != nil {
+				return nil, getErr
+			}
+			return c.mikanDetail(target, body)
+		})
+		result := mapValue(value)
+		if result != nil {
+			c.overlayMikanExists(result)
 		}
-		return c.mikanDetail(target, body)
+		return result, err
 	}
 	// The legacy UI uses the Mikan home page for an unfiltered request. That
 	// page contains the current season and the seasonal catalogue; /Home/Search
@@ -104,24 +174,41 @@ func (c *Client) Mikan(text string, season map[string]any) (map[string]any, erro
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
-	body, err := c.get(target)
-	if err != nil {
-		return nil, err
+	freshFor, staleFor := 6*time.Hour, 48*time.Hour
+	if trimmedText != "" {
+		freshFor, staleFor = 30*time.Minute, 24*time.Hour
 	}
-	return c.parseMikanList(target, body), nil
+	value, err := c.cachedJSON("mikan:catalog:"+target, freshFor, staleFor, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return c.parseMikanList(target, body), nil
+	})
+	result := mapValue(value)
+	if result != nil {
+		c.overlayMikanExists(result)
+	}
+	return result, err
 }
 
 func (c *Client) MikanGroup(target string) ([]map[string]any, error) {
 	if target == "" {
 		return nil, errors.New("Mikan URL is empty")
 	}
-	body, err := c.get(target)
+	value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return c.mikanDetail(target, body)
+	})
+	result := mapValue(value)
 	if err != nil {
 		return nil, err
 	}
-	result, err := c.mikanDetail(target, body)
-	if err != nil {
-		return nil, err
+	if result == nil {
+		return nil, errors.New("Mikan detail response is empty")
 	}
 	weeks, _ := result["weeks"].([]any)
 	if len(weeks) == 0 {
@@ -161,87 +248,102 @@ func (c *Client) AniBT(query map[string]any) (map[string]any, error) {
 	values.Set("season", season)
 	values.Set("bgmId", bgmID)
 	values.Set("query", title)
-	body, err := c.get(c.aniBTHost + "/api/seasons/anime?" + values.Encode())
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Data map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode AniBT response: %w", err)
-	}
-	if envelope.Data == nil {
-		return nil, errors.New("AniBT response has no data")
-	}
-	if weekdays, ok := envelope.Data["byWeekday"].([]any); ok {
-		filteredWeeks := make([]any, 0, len(weekdays))
-		for _, raw := range weekdays {
-			weekday, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			animes, _ := weekday["animes"].([]any)
-			filtered := make([]any, 0, len(animes))
-			for _, animeRaw := range animes {
-				anime, ok := animeRaw.(map[string]any)
+	target := c.aniBTHost + "/api/seasons/anime?" + values.Encode()
+	value, err := c.cachedJSON("anibt:catalog:"+target, 10*time.Minute, 24*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var envelope struct {
+			Data map[string]any `json:"data"`
+		}
+		if decodeErr := json.Unmarshal(body, &envelope); decodeErr != nil {
+			return nil, fmt.Errorf("decode AniBT response: %w", decodeErr)
+		}
+		if envelope.Data == nil {
+			return nil, errors.New("AniBT response has no data")
+		}
+		if weekdays, ok := envelope.Data["byWeekday"].([]any); ok {
+			filteredWeeks := make([]any, 0, len(weekdays))
+			for _, raw := range weekdays {
+				weekday, ok := raw.(map[string]any)
 				if !ok {
 					continue
 				}
-				if title == "" && number(anime["rssReleaseCount"]) <= 0 {
-					continue
+				animes, _ := weekday["animes"].([]any)
+				filtered := make([]any, 0, len(animes))
+				for _, animeRaw := range animes {
+					anime, ok := animeRaw.(map[string]any)
+					if !ok {
+						continue
+					}
+					if title == "" && number(anime["rssReleaseCount"]) <= 0 {
+						continue
+					}
+					filtered = append(filtered, anime)
 				}
-				anime["exists"] = c.hasBGMSubject(stringValue(anime["bgmId"]))
-				filtered = append(filtered, anime)
+				sort.SliceStable(filtered, func(i, j int) bool {
+					left, _ := filtered[i].(map[string]any)
+					right, _ := filtered[j].(map[string]any)
+					return numberFloat(left["rating"]) > numberFloat(right["rating"])
+				})
+				weekday["animes"] = filtered
+				if len(filtered) > 0 {
+					filteredWeeks = append(filteredWeeks, weekday)
+				}
 			}
-			sort.SliceStable(filtered, func(i, j int) bool {
-				left, _ := filtered[i].(map[string]any)
-				right, _ := filtered[j].(map[string]any)
-				return numberFloat(left["rating"]) > numberFloat(right["rating"])
-			})
-			weekday["animes"] = filtered
-			if len(filtered) > 0 {
-				filteredWeeks = append(filteredWeeks, weekday)
-			}
+			envelope.Data["byWeekday"] = filteredWeeks
+			sortSourceWeekdays(filteredWeeks, "weekdayLabel")
 		}
-		envelope.Data["byWeekday"] = filteredWeeks
-		sortSourceWeekdays(filteredWeeks, "weekdayLabel")
+		return envelope.Data, nil
+	})
+	result := mapValue(value)
+	if result != nil {
+		c.overlayAniBTExists(result)
 	}
-	return envelope.Data, nil
+	return result, err
 }
 
 func (c *Client) AniBTGroup(bgmID string) ([]map[string]any, error) {
-	body, err := c.get(c.aniBTHost + "/api/anime/groups?bgmId=" + url.QueryEscape(bgmID))
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Data struct {
-			Groups []map[string]any `json:"groups"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode AniBT groups: %w", err)
-	}
-	for _, group := range envelope.Data.Groups {
-		slug := stringValue(group["slug"])
-		group["bgmId"] = bgmID
-		group["rss"] = fmt.Sprintf("%s/rss/anime.xml?bgmId=%s&groupSlug=%s", c.aniBTHost, url.QueryEscape(bgmID), url.QueryEscape(slug))
-		if _, exists := group["items"]; !exists {
-			group["items"] = []any{}
+	target := c.aniBTHost + "/api/anime/groups?bgmId=" + url.QueryEscape(bgmID)
+	value, err := c.cachedJSON("anibt:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
 		}
-		if items, ok := group["items"].([]any); ok {
-			for _, raw := range items {
-				if item, ok := raw.(map[string]any); ok {
-					item["formatSize"] = formatSize(number64(item["size"]))
-				}
+		var envelope struct {
+			Data struct {
+				Groups []map[string]any `json:"groups"`
+			} `json:"data"`
+		}
+		if decodeErr := json.Unmarshal(body, &envelope); decodeErr != nil {
+			return nil, fmt.Errorf("decode AniBT groups: %w", decodeErr)
+		}
+		for _, group := range envelope.Data.Groups {
+			slug := stringValue(group["slug"])
+			group["bgmId"] = bgmID
+			group["rss"] = fmt.Sprintf("%s/rss/anime.xml?bgmId=%s&groupSlug=%s", c.aniBTHost, url.QueryEscape(bgmID), url.QueryEscape(slug))
+			if _, exists := group["items"]; !exists {
+				group["items"] = []any{}
 			}
-			group["groupRegex"] = buildGroupRegex(groupTitles(items))
-		} else {
-			group["groupRegex"] = map[string]any{"regexList": []any{}, "tags": []string{}}
+			if items, ok := group["items"].([]any); ok {
+				for _, raw := range items {
+					if item, ok := raw.(map[string]any); ok {
+						item["formatSize"] = formatSize(number64(item["size"]))
+					}
+				}
+				group["groupRegex"] = buildGroupRegex(groupTitles(items))
+			} else {
+				group["groupRegex"] = map[string]any{"regexList": []any{}, "tags": []string{}}
+			}
 		}
-	}
-	return envelope.Data.Groups, nil
+		groups := make([]any, 0, len(envelope.Data.Groups))
+		for _, group := range envelope.Data.Groups {
+			groups = append(groups, group)
+		}
+		return groups, nil
+	})
+	return mapListValue(value), err
 }
 
 func (c *Client) AnimeGardenList(bgmURL string) ([]map[string]any, error) {
@@ -256,23 +358,34 @@ func (c *Client) AnimeGardenList(bgmURL string) ([]map[string]any, error) {
 		}
 		return []map[string]any{{"weekLabel": "搜索", "subjects": []any{subject}}}, nil
 	}
-	body, err := c.get(c.gardenHost + "/subjects")
+	target := c.gardenHost + "/subjects"
+	value, err := c.cachedJSON("animegarden:catalog:"+target, 24*time.Hour, 7*24*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var envelope struct {
+			Subjects []map[string]any `json:"subjects"`
+		}
+		if decodeErr := json.Unmarshal(body, &envelope); decodeErr != nil {
+			return nil, fmt.Errorf("decode AnimeGarden subjects: %w", decodeErr)
+		}
+		return envelope.Subjects, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var envelope struct {
-		Subjects []map[string]any `json:"subjects"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode AnimeGarden subjects: %w", err)
-	}
+	subjects := mapListValue(value)
 	// AnimeGarden intentionally does not include a cover in /subjects. The
 	// Java service overlays this response with the public Bangumi cover cache;
 	// keep the overlay best-effort so a cache outage does not blank the page.
-	bgmCovers := c.bangumiCoverCache()
+	var bgmCovers map[string]any
+	if len(subjects) > 0 {
+		bgmCovers = c.bangumiCoverCache()
+	}
 	weeks := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
 	grouped := map[string][]any{}
-	for _, subject := range envelope.Subjects {
+	for _, subject := range subjects {
 		id := stringValue(subject["id"])
 		if cover := bangumiCoverURL(bgmCovers[id]); cover != "" {
 			subject["cover"] = cover
@@ -298,15 +411,21 @@ func (c *Client) bangumiCoverCache() map[string]any {
 	if c.bgmCoverURL == "" {
 		return nil
 	}
-	body, err := c.get(c.bgmCoverURL)
+	value, err := c.cachedJSON("bangumi:covers:"+c.bgmCoverURL, 6*time.Hour, 7*24*time.Hour, func() (any, error) {
+		body, getErr := c.get(c.bgmCoverURL)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var result map[string]any
+		if decodeErr := json.Unmarshal(body, &result); decodeErr != nil {
+			return nil, decodeErr
+		}
+		return result, nil
+	})
 	if err != nil {
 		return nil
 	}
-	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil
-	}
-	return result
+	return mapValue(value)
 }
 
 func bangumiCoverURL(value any) string {
@@ -325,48 +444,56 @@ func bangumiCoverURL(value any) string {
 
 func (c *Client) AnimeGardenGroup(bgmID string) ([]map[string]any, error) {
 	values := url.Values{"subject": []string{bgmID}, "pageSize": []string{"200"}, "duplicate": []string{"false"}}
-	body, err := c.get(c.gardenHost + "/resources?" + values.Encode())
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Resources []map[string]any `json:"resources"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode AnimeGarden resources: %w", err)
-	}
-	groups := map[string]map[string]any{}
-	for _, item := range envelope.Resources {
-		fansub, _ := item["fansub"].(map[string]any)
-		if fansub == nil {
-			continue
+	target := c.gardenHost + "/resources?" + values.Encode()
+	value, err := c.cachedJSON("animegarden:resources:"+target, time.Hour, 6*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
 		}
-		id, name := stringValue(fansub["id"]), stringValue(fansub["name"])
-		group := groups[id]
-		if group == nil {
-			// Match the Java endpoint's URL contract. It escapes the ampersand
-			// separator inside a fansub name, but leaves spaces as-is.
-			group = map[string]any{"id": id, "name": name, "bgmId": bgmID, "rss": fmt.Sprintf("%s/feed.xml?subject=%s&fansub=%s", c.gardenHost, bgmID, strings.ReplaceAll(name, "&", "%26")), "items": []any{}}
-			// The Java endpoint exposes createdAt. fetchedAt is only the time
-			// the API ingested a resource and must not affect group ordering.
-			group["lastUpdatedAt"] = itemTime(item, "createdAt")
-			groups[id] = group
-		} else if newer(itemTime(item, "createdAt"), group["lastUpdatedAt"]) {
-			group["lastUpdatedAt"] = itemTime(item, "createdAt")
+		var envelope struct {
+			Resources []map[string]any `json:"resources"`
 		}
-		items := group["items"].([]any)
-		item["formatSize"] = formatSize(number64(item["size"]))
-		group["items"] = append(items, item)
-	}
-	result := make([]map[string]any, 0, len(groups))
-	for _, group := range groups {
-		group["groupRegex"] = buildGroupRegex(groupTitles(group["items"]))
-		result = append(result, group)
-	}
-	sort.SliceStable(result, func(i, j int) bool {
-		return newer(result[i]["lastUpdatedAt"], result[j]["lastUpdatedAt"])
+		if decodeErr := json.Unmarshal(body, &envelope); decodeErr != nil {
+			return nil, fmt.Errorf("decode AnimeGarden resources: %w", decodeErr)
+		}
+		groups := map[string]map[string]any{}
+		for _, item := range envelope.Resources {
+			fansub, _ := item["fansub"].(map[string]any)
+			if fansub == nil {
+				continue
+			}
+			id, name := stringValue(fansub["id"]), stringValue(fansub["name"])
+			group := groups[id]
+			if group == nil {
+				// Match the Java endpoint's URL contract. It escapes the ampersand
+				// separator inside a fansub name, but leaves spaces as-is.
+				group = map[string]any{"id": id, "name": name, "bgmId": bgmID, "rss": fmt.Sprintf("%s/feed.xml?subject=%s&fansub=%s", c.gardenHost, bgmID, strings.ReplaceAll(name, "&", "%26")), "items": []any{}}
+				// The Java endpoint exposes createdAt. fetchedAt is only the time
+				// the API ingested a resource and must not affect group ordering.
+				group["lastUpdatedAt"] = itemTime(item, "createdAt")
+				groups[id] = group
+			} else if newer(itemTime(item, "createdAt"), group["lastUpdatedAt"]) {
+				group["lastUpdatedAt"] = itemTime(item, "createdAt")
+			}
+			items := group["items"].([]any)
+			item["formatSize"] = formatSize(number64(item["size"]))
+			group["items"] = append(items, item)
+		}
+		result := make([]map[string]any, 0, len(groups))
+		for _, group := range groups {
+			group["groupRegex"] = buildGroupRegex(groupTitles(group["items"]))
+			result = append(result, group)
+		}
+		sort.SliceStable(result, func(i, j int) bool {
+			return newer(result[i]["lastUpdatedAt"], result[j]["lastUpdatedAt"])
+		})
+		groupsValue := make([]any, 0, len(result))
+		for _, group := range result {
+			groupsValue = append(groupsValue, group)
+		}
+		return groupsValue, nil
 	})
-	return result, nil
+	return mapListValue(value), err
 }
 
 // sortSourceWeekdays mirrors the Java WeekComparator: the current weekday is
@@ -430,35 +557,48 @@ func (c *Client) SearchBangumi(name string) ([]map[string]any, error) {
 		return []map[string]any{}, nil
 	}
 	target := c.bangumiAPI + "/search/subject/" + url.PathEscape(strings.ReplaceAll(name, "1/2", "½")) + "?type=2&max_results=25&responseGroup=small"
-	body, err := c.get(target)
+	value, err := c.cachedJSON("bangumi:search:"+target, time.Hour, 24*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var response struct {
+			List []map[string]any `json:"list"`
+		}
+		if decodeErr := json.Unmarshal(body, &response); decodeErr != nil {
+			return nil, decodeErr
+		}
+		if response.List == nil {
+			return []map[string]any{}, nil
+		}
+		return response.List, nil
+	})
 	if err != nil {
 		// BgmUtil.search deliberately treats an unavailable search result as an
 		// empty list. The UI uses this endpoint as an optional lookup and should
 		// not turn a 404 or transient upstream response into a page-level error.
 		return []map[string]any{}, nil
 	}
-	var response struct {
-		List []map[string]any `json:"list"`
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return []map[string]any{}, nil
-	}
-	if response.List == nil {
-		return []map[string]any{}, nil
-	}
-	return response.List, nil
+	return mapListValue(value), nil
 }
 
 func (c *Client) BangumiSubject(id string) (map[string]any, error) {
-	body, err := c.get(c.bangumiAPI + "/v0/subjects/" + url.PathEscape(id))
+	target := c.bangumiAPI + "/v0/subjects/" + url.PathEscape(id)
+	value, err := c.cachedJSON("bangumi:subject:"+target, 6*time.Hour, 7*24*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var result map[string]any
+		if decodeErr := json.Unmarshal(body, &result); decodeErr != nil {
+			return nil, decodeErr
+		}
+		return result, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return mapValue(value), nil
 }
 
 // SubjectEpisodeCount returns Bangumi's eps field for manual progress updates.
@@ -613,17 +753,23 @@ func (c *Client) BGMTitle(item model.Ani) (string, error) {
 
 func (c *Client) subjectEpisodeCount(id string) (int, error) {
 	target := c.bangumiAPI + "/v0/episodes?subject_id=" + url.QueryEscape(id) + "&type=0&limit=1000&offset=0"
-	body, err := c.get(target)
+	value, err := c.cachedJSON("bangumi:episodes:"+target, time.Hour, 24*time.Hour, func() (any, error) {
+		body, getErr := c.get(target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		var response struct {
+			Data []map[string]any `json:"data"`
+		}
+		if decodeErr := json.Unmarshal(body, &response); decodeErr != nil {
+			return nil, decodeErr
+		}
+		return len(response.Data), nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	var response struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return 0, err
-	}
-	return len(response.Data), nil
+	return int(number(value)), nil
 }
 
 func episodeCountOrDefault(c *Client, id string, fallback int) int {
@@ -993,6 +1139,27 @@ func (c *Client) hasMikanSubject(id string) bool {
 	return false
 }
 
+// overlayMikanExists reapplies the local subscription state after a cached
+// catalogue/detail response is decoded. The upstream HTML is cacheable, but
+// this field changes immediately when the user adds or removes a subscription.
+func (c *Client) overlayMikanExists(result map[string]any) {
+	weeks, _ := result["weeks"].([]any)
+	for _, rawWeek := range weeks {
+		week, _ := rawWeek.(map[string]any)
+		items, _ := week["items"].([]any)
+		for _, rawItem := range items {
+			item, _ := rawItem.(map[string]any)
+			id := stringValue(item["bgmId"])
+			if id == "" {
+				id = trailingDigits(stringValue(item["url"]))
+			}
+			if id != "" {
+				item["exists"] = c.hasMikanSubject(id)
+			}
+		}
+	}
+}
+
 func (c *Client) hasBGMSubject(id string) bool {
 	if c.subscriptions == nil || id == "" {
 		return false
@@ -1003,6 +1170,20 @@ func (c *Client) hasBGMSubject(id string) bool {
 		}
 	}
 	return false
+}
+
+// overlayAniBTExists keeps AniBT's local-only subscription marker fresh while
+// allowing the relatively static catalogue to remain cached.
+func (c *Client) overlayAniBTExists(result map[string]any) {
+	weeks, _ := result["byWeekday"].([]any)
+	for _, rawWeek := range weeks {
+		week, _ := rawWeek.(map[string]any)
+		animes, _ := week["animes"].([]any)
+		for _, rawAnime := range animes {
+			anime, _ := rawAnime.(map[string]any)
+			anime["exists"] = c.hasBGMSubject(stringValue(anime["bgmId"]))
+		}
+	}
 }
 
 func mikanID(value string) string {

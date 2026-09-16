@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -633,5 +634,77 @@ func TestSourceClientsReturnDiagnosableEmptyResultsForMissingFields(t *testing.T
 	groups, err := client.AnimeGardenGroup("42")
 	if err != nil || len(groups) != 0 {
 		t.Fatalf("missing AnimeGarden group = %#v, err = %v", groups, err)
+	}
+}
+
+func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *testing.T) {
+	var mikanCalls atomic.Int32
+	var aniBTCalls atomic.Int32
+	var subscribed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Home/Search":
+			mikanCalls.Add(1)
+			_, _ = w.Write([]byte(`<div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><span data-src="/cover.jpg"></span><a href="/Home/Bangumi/123">Mikan Demo</a></li></ul></div>`))
+		case "/api/seasons/anime":
+			aniBTCalls.Add(1)
+			_, _ = w.Write([]byte(`{"data":{"byWeekday":[{"weekday":1,"weekdayLabel":"星期一","animes":[{"bgmId":"42","rating":8,"rssReleaseCount":1}]}]}}`))
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+	}))
+	defer server.Close()
+
+	cache := source.NewCache(16)
+	client := source.New(source.Options{
+		MikanHost: server.URL,
+		AniBTHost: server.URL,
+		Cache:     cache,
+		Subscriptions: func() []model.Ani {
+			if !subscribed.Load() {
+				return nil
+			}
+			return []model.Ani{
+				{URL: server.URL + "/RSS/Bangumi?bangumiId=123"},
+				{BGMURL: "https://bgm.tv/subject/42"},
+			}
+		},
+	})
+
+	firstMikan, err := client.Mikan("demo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMikanItem := firstMikan["weeks"].([]any)[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+	if firstMikanItem["exists"] != false {
+		t.Fatalf("initial Mikan marker = %#v", firstMikanItem["exists"])
+	}
+	firstAniBT, err := client.AniBT(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAniBTItem := firstAniBT["byWeekday"].([]any)[0].(map[string]any)["animes"].([]any)[0].(map[string]any)
+	if firstAniBTItem["exists"] != false {
+		t.Fatalf("initial AniBT marker = %#v", firstAniBTItem["exists"])
+	}
+
+	subscribed.Store(true)
+	secondMikan, err := client.Mikan("demo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMikanItem := secondMikan["weeks"].([]any)[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+	secondAniBT, err := client.AniBT(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAniBTItem := secondAniBT["byWeekday"].([]any)[0].(map[string]any)["animes"].([]any)[0].(map[string]any)
+	if secondMikanItem["exists"] != true || secondAniBTItem["exists"] != true {
+		t.Fatalf("cached markers = Mikan %#v, AniBT %#v", secondMikanItem["exists"], secondAniBTItem["exists"])
+	}
+	if mikanCalls.Load() != 1 || aniBTCalls.Load() != 1 {
+		t.Fatalf("upstream calls = Mikan %d, AniBT %d", mikanCalls.Load(), aniBTCalls.Load())
 	}
 }

@@ -1811,6 +1811,65 @@ func TestRunSchedulersRefreshesRSSOnlyWhenGoOwnsTheDomain(t *testing.T) {
 	}
 }
 
+func TestRunSchedulersWarmsSourceCatalogsWhenGoOwnsSources(t *testing.T) {
+	var calls atomic.Int32
+	warmed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = io.WriteString(w, `<div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><a href="/Home/Bangumi/123">Demo</a></li></ul></div>`)
+		case "/api/seasons/anime":
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		case "/subjects":
+			_, _ = io.WriteString(w, `{"subjects":[]}`)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 3 {
+			close(warmed)
+		}
+	}))
+	defer server.Close()
+
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"sources"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if err := app.Config().Update(model.Config{
+		"mikanHost":       server.URL,
+		"aniBTHost":       server.URL,
+		"animeGardenHost": server.URL,
+		"bgmApi":          server.URL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		app.RunSchedulers(ctx)
+		close(done)
+	}()
+	select {
+	case <-warmed:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("source catalog warm-up did not finish; calls=%d", calls.Load())
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("source scheduler did not stop")
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("source warm-up calls = %d, want 3", calls.Load())
+	}
+}
+
 func login(t *testing.T, baseURL string) string {
 	t.Helper()
 	response := callJSON(t, baseURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})

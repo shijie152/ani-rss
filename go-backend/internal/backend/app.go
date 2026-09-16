@@ -65,6 +65,7 @@ type App struct {
 	configDir     string
 	logger        *slog.Logger
 	notifications *notification.Dispatcher
+	sourceCache   *source.Cache
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
 	backgroundWG  sync.WaitGroup
@@ -135,7 +136,7 @@ func New(options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: source.NewCache(256), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
 	app.logger.Info("Go backend initialized")
 	app.subscriptions.ConfigureSideEffects(func(ctx context.Context) (subscription.TaskManager, error) {
 		coordinator, factoryErr := app.newCoordinator()
@@ -395,31 +396,71 @@ func (a *App) repairLoadedSubscriptions(items []model.Ani) error {
 // The method blocks until ctx is cancelled and is intended to run in one
 // goroutine from the command entrypoint.
 func (a *App) RunSchedulers(ctx context.Context) {
-	if _, owned := a.ownership.Owner("rss"); !owned {
+	_, rssOwned := a.ownership.Owner("rss")
+	_, sourcesOwned := a.ownership.Owner("sources")
+	if !rssOwned && !sourcesOwned {
 		return
 	}
-	interval := time.Duration(appconfig.Int(a.config.Snapshot(), "rssSleepMinutes")) * time.Minute
-	if interval <= 0 {
-		interval = time.Minute
+	var rssC <-chan time.Time
+	var rssTicker *time.Ticker
+	if rssOwned {
+		interval := time.Duration(appconfig.Int(a.config.Snapshot(), "rssSleepMinutes")) * time.Minute
+		if interval <= 0 {
+			interval = time.Minute
+		}
+		rssTicker = time.NewTicker(interval)
+		rssC = rssTicker.C
+		defer rssTicker.Stop()
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	run := func() {
-		if !appconfig.Bool(a.config.Snapshot(), "rss") {
+	var sourceC <-chan time.Time
+	var sourceTicker *time.Ticker
+	if sourcesOwned {
+		// Source catalogues are deliberately refreshed independently of the RSS
+		// scheduler. A slow upstream must never delay RSS polling or an HTTP
+		// request; the cache still decides whether the warm-up contacts upstream.
+		sourceTicker = time.NewTicker(10 * time.Minute)
+		sourceC = sourceTicker.C
+		defer sourceTicker.Stop()
+		a.runBackground(a.prewarmSourceCatalogs)
+	}
+	runRSS := func() {
+		if !rssOwned || !appconfig.Bool(a.config.Snapshot(), "rss") {
 			return
 		}
 		if err := a.refreshAllSubscriptions(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			a.logger.Warn("scheduled RSS refresh failed", "error", err)
 		}
 	}
-	run()
+	runRSS()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			run()
+		case <-rssC:
+			runRSS()
+		case <-sourceC:
+			a.runBackground(a.prewarmSourceCatalogs)
 		}
+	}
+}
+
+// prewarmSourceCatalogs populates the shared source cache with the catalogues
+// used by the home pages. It is run in the backend's background worker so a
+// third-party timeout cannot hold up RSS refreshes or the scheduler loop.
+func (a *App) prewarmSourceCatalogs() {
+	client, err := a.sourceClient()
+	if err != nil {
+		a.logger.Warn("source cache warm-up setup failed", "error", err)
+		return
+	}
+	if _, err := client.Mikan("", nil); err != nil {
+		a.logger.Warn("Mikan source cache warm-up failed", "error", err)
+	}
+	if _, err := client.AniBT(map[string]any{}); err != nil {
+		a.logger.Warn("AniBT source cache warm-up failed", "error", err)
+	}
+	if _, err := client.AnimeGardenList(""); err != nil {
+		a.logger.Warn("AnimeGarden source cache warm-up failed", "error", err)
 	}
 }
 
@@ -827,6 +868,8 @@ func (a *App) sourceClient() (*source.Client, error) {
 		HTTPClient:      client,
 		Retries:         appconfig.Int(cfg, "downloadRetry"),
 		Subscriptions:   a.subscriptions.Items,
+		Cache:           a.sourceCache,
+		Background:      a.runBackground,
 	}), nil
 }
 
