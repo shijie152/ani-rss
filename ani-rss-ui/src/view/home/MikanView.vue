@@ -148,11 +148,17 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {onBeforeUnmount, onMounted, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy, Download as DownloadIcon} from "@element-plus/icons-vue";
 import {proxyImage} from "@/js/global.js";
 import * as http from "@/js/http.js";
+import {
+  readMikanSearchCache,
+  readSeasonCache,
+  writeMikanSearchCache,
+  writeSeasonCache
+} from "./seasonCatalogCache.js";
 
 // 批量添加订阅
 let rssList = ref([]);
@@ -161,6 +167,9 @@ let groupLoading = ref(false)
 let activeName = ref("")
 let dialogVisible = ref(false)
 let loading = ref(false)
+let mikanRefreshTimer
+let requestSequence = 0
+let lastRequest = null
 let data = ref({
   'seasons': [],
   'items': [],
@@ -209,6 +218,9 @@ let searchAni = ani => {
 let text = ref('')
 
 let searchLoading = ref(false)
+const SEASON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
+const SEARCH_CACHE_TTL = 30 * 60 * 1000
+
 let search = () => {
   if (text.value.length === 1) {
     ElMessage.error("搜索最少需要两个字符")
@@ -220,35 +232,93 @@ let search = () => {
   })
 }
 
-let list = async (text, body) => {
-  loading.value = true
-  text = text ? text : ''
-  body = body ? body : {}
-  return http.mikan(text, body)
-      .then(res => {
-        let {seasons, weeks, totalItems} = res.data;
+const applyData = response => {
+  const seasons = Array.isArray(response?.seasons) ? response.seasons : []
+  const weeks = Array.isArray(response?.weeks) ? response.weeks : []
+  if (seasons.length) {
+    data.value.seasons = seasons
+  }
+  data.value.weeks = weeks
+  if (weeks.length) {
+    activeName.value = weeks[0].weekLabel
+  }
+  if (!seasonSelect.value) {
+    const selected = data.value.seasons.find(item => item.select)
+    if (selected) seasonSelect.value = selected.seasonLabel
+  }
+}
 
-        if (totalItems < 1) {
-          ElMessage.warning("搜索结果为空")
-        }
+const cacheForRequest = (query, body) => {
+  const normalizedText = String(query || '').trim()
+  if (normalizedText) {
+    return {
+      type: 'search',
+      key: normalizedText,
+      cached: readMikanSearchCache(normalizedText),
+      ttl: SEARCH_CACHE_TTL
+    }
+  }
+  const season = body?.seasonLabel
+      || (body?.year && body?.season ? `${body.year} ${body.season}` : '')
+  return {
+    type: 'season',
+    key: season || 'current',
+    cached: readSeasonCache('mikan', season || 'current'),
+    ttl: SEASON_CACHE_TTL
+  }
+}
 
-        if (seasons.length) {
-          data.value.seasons = seasons
-        }
-        data.value.weeks = weeks
-        if (weeks.length) {
-          activeName.value = weeks[0].weekLabel
-        }
-        for (let season of data.value.seasons) {
-          if (season['select'] && !seasonSelect.value) {
-            seasonSelect.value = season['seasonLabel']
-            return
-          }
-        }
-      })
-      .finally(() => {
-        loading.value = false
-      });
+const saveCache = (cache, response) => {
+  if (cache.type === 'search') {
+    writeMikanSearchCache(cache.key, response)
+  } else {
+    writeSeasonCache('mikan', cache.key, response)
+  }
+}
+
+const list = async (query = '', body = {}, options = {}) => {
+  const sequence = ++requestSequence
+  const normalizedText = String(query || '').trim()
+  const normalizedBody = body && typeof body === 'object' ? {...body} : {}
+  const cache = cacheForRequest(normalizedText, normalizedBody)
+  const cached = cache.cached
+  const background = options.background === true
+  const force = options.force === true
+  lastRequest = {text: normalizedText, body: normalizedBody}
+
+  if (!force && cached) {
+    applyData(cached.data)
+    // Stale-while-revalidate: keep the cached catalogue visible while the
+    // source request runs instead of covering it with a loading mask.
+    loading.value = false
+    if (Date.now() - cached.savedAt < cache.ttl) {
+      return cached.data
+    }
+  }
+
+  const showLoading = !background && !cached
+  if (showLoading) loading.value = true
+  try {
+    const res = await http.mikan(normalizedText, normalizedBody)
+    if (sequence !== requestSequence) return res.data
+    const response = res.data || {seasons: [], weeks: [], totalItems: 0}
+    applyData(response)
+    saveCache(cache, response)
+    if (response.totalItems < 1 && normalizedText) {
+      ElMessage.warning("搜索结果为空")
+    }
+    return response
+  } catch (e) {
+    if (sequence !== requestSequence) return null
+    if (!cached) {
+      ElMessage.error(e?.message || '加载 Mikan 数据失败')
+    } else if (!background) {
+      ElMessage.warning('网络请求失败，已显示缓存的 Mikan 数据')
+    }
+    return cached?.data || null
+  } finally {
+    if (sequence === requestSequence && showLoading) loading.value = false
+  }
 }
 
 let change = (v) => {
@@ -256,6 +326,19 @@ let change = (v) => {
   if (body.length) {
     list('', body[0])
   }
+}
+
+const scheduleMikanRefresh = () => {
+  clearTimeout(mikanRefreshTimer)
+  const now = new Date()
+  const next = new Date(now)
+  next.setHours(3, 0, 0, 0)
+  if (next <= now) next.setDate(next.getDate() + 1)
+  mikanRefreshTimer = window.setTimeout(async () => {
+    const request = lastRequest || {text: '', body: {}}
+    await list(request.text, request.body, {force: true, background: true})
+    scheduleMikanRefresh()
+  }, next.getTime() - now.getTime())
 }
 
 let selectName = ref('')
@@ -312,6 +395,9 @@ let open = url => {
 }
 
 defineExpose({show})
+
+onMounted(scheduleMikanRefresh)
+onBeforeUnmount(() => clearTimeout(mikanRefreshTimer))
 
 let emit = defineEmits(['callback'])
 

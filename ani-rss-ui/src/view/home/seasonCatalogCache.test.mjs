@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {preserveSeasonOptions, readSeasonCache, writeSeasonCache} from './seasonCatalogCache.js'
+import {
+  mikanSearchCacheKey,
+  preserveSeasonOptions,
+  readMikanSearchCache,
+  readSeasonCache,
+  writeMikanSearchCache,
+  writeSeasonCache
+} from './seasonCatalogCache.js'
 
 class MemoryStorage {
   #values = new Map()
@@ -83,4 +90,28 @@ test('keeps a valid AniBT catalogue cache', () => {
 
   assert.equal(savedAt, 1000)
   assert.deepEqual(readSeasonCache('ani-bt', '2026 夏', storage), {version: 'v2', savedAt: 1000, data})
+})
+
+test('normalizes Mikan search cache keys', () => {
+  assert.equal(mikanSearchCacheKey('  Bocchi  '), mikanSearchCacheKey('bocchi'))
+})
+
+test('keeps a valid Mikan search cache, including empty results', () => {
+  const storage = new MemoryStorage()
+  const data = {seasons: [], weeks: [{weekLabel: 'Search', items: []}], totalItems: 0}
+  const savedAt = writeMikanSearchCache('demo', data, storage, 1000)
+
+  assert.equal(savedAt, 1000)
+  assert.deepEqual(readMikanSearchCache('demo', storage), {version: 'v2', savedAt: 1000, data})
+})
+
+test('does not reuse a malformed Mikan search cache', () => {
+  const storage = new MemoryStorage()
+  storage.setItem(mikanSearchCacheKey('demo'), JSON.stringify({
+    version: 'v2',
+    savedAt: 1000,
+    data: {weeks: [{weekLabel: 'Search', items: []}]}
+  }))
+
+  assert.equal(readMikanSearchCache('demo', storage), null)
 })

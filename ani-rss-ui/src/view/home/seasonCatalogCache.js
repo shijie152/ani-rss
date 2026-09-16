@@ -1,10 +1,14 @@
 const CACHE_VERSION = 'v2'
 const CACHE_PREFIX = 'ani-rss:season-catalog:'
+const MIKAN_SEARCH_CACHE_PREFIX = 'ani-rss:mikan-search:'
 
 const storageOrDefault = storage => storage || globalThis.localStorage
 
 export const seasonCacheKey = (source, season) =>
   `${CACHE_PREFIX}${CACHE_VERSION}:${source}:${encodeURIComponent(season || 'current')}`
+
+export const mikanSearchCacheKey = text =>
+  `${MIKAN_SEARCH_CACHE_PREFIX}${CACHE_VERSION}:${encodeURIComponent(String(text || '').trim().toLowerCase())}`
 
 // Filtered catalogue responses may omit the season selector entirely. Keep
 // the selector loaded by the initial catalogue request instead of replacing
@@ -63,6 +67,36 @@ export const writeSeasonCache = (source, season, data, storage = undefined, now 
     storageOrDefault(storage).setItem(seasonCacheKey(source, season), JSON.stringify(cached))
   } catch (e) {
     // 浏览器存储空间不足时不影响季度页面使用
+  }
+  return now
+}
+
+const isMikanSearchResponse = data => {
+  if (!data || !Array.isArray(data.seasons) || !Array.isArray(data.weeks)) return false
+  return data.totalItems === undefined || (Number.isFinite(data.totalItems) && data.totalItems >= 0)
+}
+
+export const readMikanSearchCache = (text, storage = undefined) => {
+  try {
+    const value = storageOrDefault(storage).getItem(mikanSearchCacheKey(text))
+    if (!value) return null
+    const cached = JSON.parse(value)
+    if (cached?.version !== CACHE_VERSION || !Number.isFinite(cached.savedAt) || !isMikanSearchResponse(cached.data)) {
+      return null
+    }
+    return cached
+  } catch (e) {
+    return null
+  }
+}
+
+export const writeMikanSearchCache = (text, data, storage = undefined, now = Date.now()) => {
+  if (!isMikanSearchResponse(data)) return 0
+  const cached = {version: CACHE_VERSION, savedAt: now, data}
+  try {
+    storageOrDefault(storage).setItem(mikanSearchCacheKey(text), JSON.stringify(cached))
+  } catch (e) {
+    // 浏览器存储空间不足时不影响 Mikan 搜索页面使用
   }
   return now
 }
