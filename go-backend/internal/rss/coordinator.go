@@ -2,11 +2,7 @@ package rss
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,40 +25,18 @@ type Coordinator struct {
 	Retry         int
 	ConfigDir     string
 	mu            sync.Mutex
+	inFlight      map[string]struct{}
 }
 
 func (c *Coordinator) Refresh(ctx context.Context, item model.Ani) ([]model.Resource, error) {
 	if c.QB == nil {
 		return nil, errors.New("下载器未配置")
 	}
-	feeds := []struct {
-		url, subgroup string
-		offset        int
-		master        bool
-	}{{item.URL, item.Subgroup, item.Offset, true}}
-	if appconfig.Bool(c.Config.Snapshot(), "standbyRss") {
-		for _, standby := range item.StandbyRSSList {
-			feeds = append(feeds, struct {
-				url, subgroup string
-				offset        int
-				master        bool
-			}{standby.URL, standby.Label, standby.Offset, false})
-		}
-	}
-	all := []model.Resource{}
+	all, intakeErr := c.intake().Collect(ctx, item)
 	var failures []string
-	for _, feed := range feeds {
-		if feed.url == "" {
-			continue
-		}
-		resources, err := c.refreshFeed(ctx, item, feed.url, feed.subgroup, feed.offset, feed.master)
-		if err != nil {
-			failures = append(failures, feed.url+": "+err.Error())
-			continue
-		}
-		all = append(all, resources...)
+	if intakeErr != nil {
+		failures = append(failures, intakeErr.Error())
 	}
-	all = dedupeFeeds(all, item, appconfig.Bool(c.Config.Snapshot(), "coexist"))
 	submitted, submitErr := c.submit(ctx, item, all)
 	progressResources := all
 	if submitErr != nil {
@@ -88,38 +62,7 @@ func (c *Coordinator) Refresh(ctx context.Context, item model.Ani) ([]model.Reso
 // Preview returns the same parsed and matched resources as Refresh without
 // contacting the downloader or mutating resource history.
 func (c *Coordinator) Preview(ctx context.Context, item model.Ani) ([]model.Resource, error) {
-	feeds := []struct {
-		url, subgroup string
-		offset        int
-		master        bool
-	}{{item.URL, item.Subgroup, item.Offset, true}}
-	if appconfig.Bool(c.Config.Snapshot(), "standbyRss") {
-		for _, standby := range item.StandbyRSSList {
-			feeds = append(feeds, struct {
-				url, subgroup string
-				offset        int
-				master        bool
-			}{standby.URL, standby.Label, standby.Offset, false})
-		}
-	}
-	resources := []model.Resource{}
-	var failures []string
-	for _, feed := range feeds {
-		if feed.url == "" {
-			continue
-		}
-		values, err := c.fetchFeed(ctx, item, feed.url, feed.subgroup, feed.offset, feed.master)
-		if err != nil {
-			failures = append(failures, feed.url+": "+err.Error())
-			continue
-		}
-		resources = append(resources, values...)
-	}
-	resources = dedupeFeeds(resources, item, appconfig.Bool(c.Config.Snapshot(), "coexist"))
-	if len(failures) > 0 {
-		return resources, errors.New(strings.Join(failures, "; "))
-	}
-	return resources, nil
+	return c.intake().Collect(ctx, item)
 }
 
 // PreviewResult is shaped for the existing PreviewView component.
@@ -175,68 +118,11 @@ func omitEpisodes(items []model.Item) []int {
 }
 
 func (c *Coordinator) refreshFeed(ctx context.Context, item model.Ani, feedURL, subgroup string, offset int, master bool) ([]model.Resource, error) {
-	return c.fetchFeed(ctx, item, feedURL, subgroup, offset, master)
+	return c.intake().CollectFeed(ctx, item, Feed{URL: feedURL, Subgroup: subgroup, Offset: offset, Master: master})
 }
 
-func (c *Coordinator) fetchFeed(ctx context.Context, item model.Ani, feedURL, subgroup string, offset int, master bool) ([]model.Resource, error) {
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: time.Duration(appconfig.Int(c.Config.Snapshot(), "rssTimeout")) * time.Second}
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("User-Agent", "ani-rss-go")
-	attempts := c.Retry
-	if attempts < 1 {
-		attempts = appconfig.Int(c.Config.Snapshot(), "downloadRetry")
-	}
-	if attempts < 1 {
-		attempts = 1
-	}
-	var body []byte
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		response, requestErr := client.Do(request)
-		if requestErr == nil {
-			body, lastErr = readRSSResponse(response)
-			if lastErr == nil {
-				break
-			}
-		} else {
-			lastErr = requestErr
-		}
-		if attempt+1 < attempts {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
-			}
-		}
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	resources, err := Parse(body, subgroup, feedURL)
-	if err != nil {
-		return nil, err
-	}
-	feedItem := item
-	feedItem.Subgroup = subgroup
-	options := MatchOptions{GlobalExclude: appconfig.Strings(c.Config.Snapshot(), "exclude"), DownloadNew: item.DownloadNew, SkipHalf: appconfig.Bool(c.Config.Snapshot(), "skip5"), Offset: offset, DelayedMinutes: appconfig.Int(c.Config.Snapshot(), "delayedDownload"), CustomEpisode: item.CustomEpisode, CustomEpisodeRE: item.CustomEpisodeStr, CustomEpisodeIdx: item.CustomEpisodeGroupIndex}
-	if item.CustomPriorityKeywordsEnable {
-		options.PriorityKeywords = item.CustomPriorityKeywords
-	} else if appconfig.Bool(c.Config.Snapshot(), "priorityKeywordsEnable") {
-		options.PriorityKeywords = appconfig.Strings(c.Config.Snapshot(), "priorityKeywords")
-	}
-	options.Coexist = appconfig.Bool(c.Config.Snapshot(), "coexist")
-	resources = Match(resources, feedItem, options)
-	for index := range resources {
-		resources[index].Master = master
-		resources[index].AniID = item.ID
-	}
-	return resources, nil
+func (c *Coordinator) intake() *Intake {
+	return &Intake{Config: c.Config, HTTPClient: c.HTTPClient, Retry: c.Retry}
 }
 
 func (c *Coordinator) RefreshAll(ctx context.Context) (map[string][]model.Resource, error) {
@@ -273,171 +159,38 @@ func (c *Coordinator) WaitForCompletion(ctx context.Context, hash string, interv
 }
 
 func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []model.Resource) ([]model.Resource, error) {
+	s := &Submitter{
+		Config:       c.Config,
+		DownloadPath: c.Subscriptions.DownloadPath,
+		SaveCache:    SaveResourceCache,
+		History:      c.History,
+		Downloader:   c.QB,
+		Notify:       c.Notify,
+		ConfigDir:    c.ConfigDir,
+		HTTPClient:   c.HTTPClient,
+		Reserve:      c.reserve,
+		Release:      c.release,
+	}
+	return s.Submit(ctx, ani, resources)
+}
+
+func (c *Coordinator) reserve(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.QB.Login(ctx); err != nil {
-		return nil, err
+	if c.inFlight == nil {
+		c.inFlight = make(map[string]struct{})
 	}
-	var history []model.Resource
-	if c.History != nil {
-		history, _ = c.History.LoadResources()
+	if _, exists := c.inFlight[key]; exists {
+		return false
 	}
-	existing := map[string]bool{}
-	for _, item := range history {
-		existing[resourceKey(item)] = true
-	}
-	// History is the durable fast path. The downloader is also consulted so a
-	// manually restored qBittorrent task cannot be submitted a second time.
-	tasks, taskErr := c.QB.Torrents(ctx)
-	if taskErr != nil {
-		// Without a successful inventory we cannot distinguish a new resource
-		// from a task restored manually or created by a previous retry. Failing
-		// closed is required for idempotent download submission.
-		return nil, fmt.Errorf("查询下载器任务失败: %w", taskErr)
-	}
-	for _, task := range tasks {
-		if task.Hash != "" {
-			existing[strings.ToLower(task.Hash)] = true
-		}
-	}
-	pathData, err := c.Subscriptions.DownloadPath(ani)
-	if err != nil {
-		return nil, err
-	}
-	savePath := pathData["downloadPath"].(string)
-	var failures []string
-	if deleteErr := c.deleteStandbyTasks(ctx, savePath, resources, tasks); deleteErr != nil {
-		// Keep submitting the primary resources even when cleanup of an old
-		// standby task fails. This matches Java's best-effort wash behavior and
-		// keeps a stale downloader task from blocking the new primary task.
-		failures = append(failures, deleteErr.Error())
-	}
-	newResources := []model.Resource{}
-	for _, resource := range resources {
-		key := resourceKey(resource)
-		if existing[key] {
-			continue
-		}
-		duplicateTask := false
-		for _, task := range tasks {
-			if (resource.InfoHash != "" && strings.EqualFold(task.Hash, resource.InfoHash)) || strings.EqualFold(task.Name, resource.Title) {
-				duplicateTask = true
-				break
-			}
-		}
-		if duplicateTask {
-			existing[key] = true
-			continue
-		}
-		tags := []string{"ani-rss"}
-		if resource.Subgroup != "" {
-			tags = append(tags, resource.Subgroup)
-		}
-		if !resource.Master {
-			tags = append(tags, "备用RSS")
-		}
-		// RSS resources are submitted by URL/magnet. Java starts these tasks
-		// immediately; rename is performed after completion, so pausing here
-		// would leave a newly submitted task idle forever.
-		if err := c.QB.Add(ctx, resource, savePath, tags, false); err != nil {
-			// qBittorrent can create the task and still lose the HTTP response
-			// (for example on a proxy timeout). Reconcile once before reporting
-			// failure so a retry does not submit the same resource twice.
-			if recovered, inventoryErr := c.QB.Torrents(ctx); inventoryErr == nil && containsResourceTask(recovered, resource) {
-				history = append(history, resource)
-				if c.ConfigDir != "" {
-					if cacheErr := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, ani, resource); cacheErr != nil {
-						failures = append(failures, resource.Title+": 缓存种子失败: "+cacheErr.Error())
-					}
-				}
-				newResources = append(newResources, resource)
-				existing[key] = true
-				if c.Notify != nil {
-					if notifyErr := c.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
-						failures = append(failures, "通知失败: "+notifyErr.Error())
-					}
-				}
-				continue
-			}
-			failures = append(failures, resource.Title+": "+err.Error())
-			continue
-		}
-		history = append(history, resource)
-		if c.ConfigDir != "" {
-			if cacheErr := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, ani, resource); cacheErr != nil {
-				failures = append(failures, resource.Title+": 缓存种子失败: "+cacheErr.Error())
-			}
-		}
-		newResources = append(newResources, resource)
-		existing[key] = true
-		if c.Notify != nil {
-			if notifyErr := c.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
-				failures = append(failures, "通知失败: "+notifyErr.Error())
-			}
-		}
-	}
-	if c.History != nil {
-		if err := c.History.SaveResources(history); err != nil {
-			return newResources, err
-		}
-	}
-	if len(failures) > 0 {
-		return newResources, errors.New(strings.Join(failures, "; "))
-	}
-	return newResources, nil
+	c.inFlight[key] = struct{}{}
+	return true
 }
 
-func containsResourceTask(tasks []model.Torrent, resource model.Resource) bool {
-	for _, task := range tasks {
-		if resource.InfoHash != "" && strings.EqualFold(task.Hash, resource.InfoHash) {
-			return true
-		}
-		if strings.EqualFold(task.Name, resource.Title) {
-			return true
-		}
-	}
-	return false
-}
-
-// deleteStandbyTasks performs the explicit wash step used by the Java
-// downloader: when a primary resource for an episode arrives, remove an old
-// standby task for the same subscription. It is deliberately opt-in because
-// deleting downloader tasks/files is user-visible and irreversible.
-func (c *Coordinator) deleteStandbyTasks(ctx context.Context, savePath string, resources []model.Resource, tasks []model.Torrent) error {
-	if !appconfig.Bool(c.Config.Snapshot(), "delete") || !appconfig.Bool(c.Config.Snapshot(), "deleteStandbyRSSOnly") || !appconfig.Bool(c.Config.Snapshot(), "standbyRss") || appconfig.Bool(c.Config.Snapshot(), "coexist") {
-		return nil
-	}
-	primaryEpisodes := map[float64]bool{}
-	for _, resource := range resources {
-		if resource.Master && resource.Episode > 0 {
-			primaryEpisodes[resource.Episode] = true
-		}
-	}
-	if len(primaryEpisodes) == 0 {
-		return nil
-	}
-	var failures []string
-	for _, task := range tasks {
-		if task.Hash == "" || task.SavePath != savePath || !hasTorrentTag(task.TagList, "备用RSS") || !primaryEpisodes[Episode(task.Name)] {
-			continue
-		}
-		if err := c.QB.Delete(ctx, task.Hash, true); err != nil {
-			failures = append(failures, task.Hash+": "+err.Error())
-		}
-	}
-	if len(failures) > 0 {
-		return errors.New("备用 RSS 清理失败: " + strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func hasTorrentTag(tags []string, target string) bool {
-	for _, tag := range tags {
-		if strings.EqualFold(strings.TrimSpace(tag), target) {
-			return true
-		}
-	}
-	return false
+func (c *Coordinator) release(key string) {
+	c.mu.Lock()
+	delete(c.inFlight, key)
+	c.mu.Unlock()
 }
 
 func dedupeFeeds(items []model.Resource, ani model.Ani, coexist bool) []model.Resource {
@@ -458,20 +211,4 @@ func dedupeFeeds(items []model.Resource, ani model.Ani, coexist bool) []model.Re
 		result = append(result, item)
 	}
 	return result
-}
-
-func readRSSResponse(response *http.Response) ([]byte, error) {
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("RSS returned HTTP %d", response.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(response.Body, 16<<20))
-}
-
-func resourceKey(resource model.Resource) string {
-	if resource.InfoHash != "" {
-		return strings.ToLower(resource.InfoHash)
-	}
-	sum := sha256.Sum256([]byte(resource.DownloadURL + "\x00" + resource.Title))
-	return hex.EncodeToString(sum[:])
 }

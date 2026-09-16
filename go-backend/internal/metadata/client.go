@@ -22,6 +22,8 @@ import (
 type Client struct {
 	Config     model.Config
 	HTTPClient *http.Client
+	Cache      *Cache
+	Retries    int
 }
 
 // Keep the public fallback used by the Java release. Users can still replace
@@ -33,7 +35,15 @@ func New(config model.Config, client *http.Client) *Client {
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
-	return &Client{Config: config, HTTPClient: client}
+	return &Client{Config: config, HTTPClient: client, Retries: 3}
+}
+
+// WithCache attaches a process-local response cache. Metadata values are
+// decoded from cached JSON on every call, so callers cannot mutate the shared
+// authority or freeze local subscription state in it.
+func (c *Client) WithCache(cache *Cache) *Client {
+	c.Cache = cache
+	return c
 }
 
 // Lookup obtains a TMDB object by the stored id, or searches by the
@@ -158,11 +168,7 @@ func (c *Client) lookupSeason(ctx context.Context, base, id string, season int, 
 }
 
 func (c *Client) lookupBangumi(ctx context.Context, id string) (model.Metadata, map[string]any, error) {
-	base := strings.TrimRight(stringValue(c.Config["bgmApi"]), "/")
-	if base == "" {
-		return model.Metadata{}, nil, errors.New("Bangumi API 未配置")
-	}
-	raw, err := c.getJSON(ctx, base+"/v0/subjects/"+url.PathEscape(id), nil)
+	raw, err := c.Subject(ctx, id)
 	if err != nil {
 		return model.Metadata{}, nil, err
 	}
@@ -170,11 +176,40 @@ func (c *Client) lookupBangumi(ctx context.Context, id string) (model.Metadata, 
 	return metadata, raw, nil
 }
 
+// Subject returns the complete Bangumi subject payload through this module's
+// single metadata transport/cache authority.
+func (c *Client) Subject(ctx context.Context, id string) (map[string]any, error) {
+	base := strings.TrimRight(stringValue(c.Config["bgmApi"]), "/")
+	if base == "" {
+		return nil, errors.New("Bangumi API 未配置")
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, errors.New("Bangumi subject 不能为空")
+	}
+	return c.getJSON(ctx, base+"/v0/subjects/"+url.PathEscape(id), nil)
+}
+
+// EpisodeCount returns the number of published Bangumi episodes for a
+// subject. The response uses the same cache and failure behavior as Subject.
+func (c *Client) EpisodeCount(ctx context.Context, id string) (int, error) {
+	base := strings.TrimRight(stringValue(c.Config["bgmApi"]), "/")
+	if base == "" || strings.TrimSpace(id) == "" {
+		return 0, errors.New("Bangumi subject 不能为空")
+	}
+	raw, err := c.getJSON(ctx, base+"/v0/episodes?subject_id="+url.QueryEscape(id)+"&type=0&limit=1000&offset=0", nil)
+	if err != nil {
+		return 0, err
+	}
+	values, _ := raw["data"].([]any)
+	return len(values), nil
+}
+
 func (c *Client) SearchBangumi(ctx context.Context, title string) ([]map[string]any, error) {
 	base := strings.TrimRight(stringValue(c.Config["bgmApi"]), "/")
 	if base == "" {
 		return nil, errors.New("Bangumi API 未配置")
 	}
+	title = strings.ReplaceAll(title, "1/2", "½")
 	query := url.Values{"type": {"2"}, "max_results": {"25"}, "responseGroup": {"small"}}
 	raw, err := c.getJSON(ctx, base+"/search/subject/"+url.PathEscape(title), query)
 	if err != nil {
@@ -237,25 +272,53 @@ func (c *Client) getJSON(ctx context.Context, target string, query url.Values) (
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, err
+	if c.Cache != nil {
+		value, err := c.Cache.JSONContext(ctx, target, func(loadCtx context.Context) (map[string]any, error) {
+			return c.getJSONRemote(loadCtx, target)
+		})
+		return value, err
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "ani-rss-go")
-	response, err := c.HTTPClient.Do(request)
-	if err != nil {
-		return nil, err
+	return c.getJSONRemote(ctx, target)
+}
+
+func (c *Client) getJSONRemote(ctx context.Context, target string) (map[string]any, error) {
+	attempts := c.Retries
+	if attempts < 1 {
+		attempts = 1
 	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("metadata service returned HTTP %d", response.StatusCode)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("User-Agent", "ani-rss-go")
+		response, err := c.HTTPClient.Do(request)
+		if err == nil {
+			var result map[string]any
+			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&result)
+			_ = response.Body.Close()
+			if decodeErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+				return result, nil
+			}
+			if decodeErr != nil {
+				lastErr = decodeErr
+			} else {
+				lastErr = fmt.Errorf("metadata service returned HTTP %d", response.StatusCode)
+			}
+		} else {
+			lastErr = err
+		}
+		if attempt+1 < attempts {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
+			}
+		}
 	}
-	var result map[string]any
-	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return nil, lastErr
 }
 
 func normalizeTMDB(raw map[string]any, ova bool) model.Metadata {

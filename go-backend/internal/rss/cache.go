@@ -41,7 +41,7 @@ func SaveResourceCache(ctx context.Context, client *http.Client, configDir strin
 		address = strings.TrimSpace(resource.DownloadURL)
 	}
 	if address == "" {
-		return errors.New("种子地址为空")
+		return errors.New("资源地址为空")
 	}
 	data := []byte(address)
 	ext := ".txt"
@@ -60,7 +60,7 @@ func SaveResourceCache(ctx context.Context, client *http.Client, configDir strin
 		}
 		defer response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return fmt.Errorf("种子服务返回 HTTP %d", response.StatusCode)
+			return fmt.Errorf("资源服务返回 HTTP %d", response.StatusCode)
 		}
 		data, err = io.ReadAll(io.LimitReader(response.Body, 64<<20))
 		if err != nil {
@@ -68,7 +68,7 @@ func SaveResourceCache(ctx context.Context, client *http.Client, configDir strin
 		}
 	}
 	if len(data) == 0 {
-		return errors.New("种子内容为空")
+		return errors.New("资源内容为空")
 	}
 	target := filepath.Join(resourceCacheDir(configDir, ani), safeHash(resource.InfoHash)+ext)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {

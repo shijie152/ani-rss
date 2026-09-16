@@ -672,8 +672,9 @@ func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *test
 			}
 		},
 	})
+	var discovery source.Discovery = client
 
-	firstMikan, err := client.Mikan("demo", nil)
+	firstMikan, err := discovery.Mikan("demo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +682,7 @@ func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *test
 	if firstMikanItem["exists"] != false {
 		t.Fatalf("initial Mikan marker = %#v", firstMikanItem["exists"])
 	}
-	firstAniBT, err := client.AniBT(map[string]any{})
+	firstAniBT, err := discovery.AniBT(map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,12 +692,12 @@ func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *test
 	}
 
 	subscribed.Store(true)
-	secondMikan, err := client.Mikan("demo", nil)
+	secondMikan, err := discovery.Mikan("demo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondMikanItem := secondMikan["weeks"].([]any)[0].(map[string]any)["items"].([]any)[0].(map[string]any)
-	secondAniBT, err := client.AniBT(map[string]any{})
+	secondAniBT, err := discovery.AniBT(map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}

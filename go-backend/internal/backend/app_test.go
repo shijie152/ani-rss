@@ -1870,6 +1870,63 @@ func TestRunSchedulersWarmsSourceCatalogsWhenGoOwnsSources(t *testing.T) {
 	}
 }
 
+func TestAppCloseStopsAndWaitsForSchedulers(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = io.WriteString(w, `<div class="sk-bangumi"></div>`)
+		case "/api/seasons/anime":
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		case "/subjects":
+			_, _ = io.WriteString(w, `{"subjects":[]}`)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		calls.Add(1)
+	}))
+	defer server.Close()
+
+	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"sources"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Config().Update(model.Config{"mikanHost": server.URL, "aniBTHost": server.URL, "animeGardenHost": server.URL, "bgmApi": server.URL}); err != nil {
+		app.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		app.RunSchedulers(context.Background())
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() < 3 {
+		app.Close()
+		<-done
+		t.Fatalf("source scheduler did not start: calls=%d", calls.Load())
+	}
+	closed := make(chan struct{})
+	go func() {
+		app.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("App.Close did not stop scheduler")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not finish after App.Close")
+	}
+}
+
 func login(t *testing.T, baseURL string) string {
 	t.Helper()
 	response := callJSON(t, baseURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})

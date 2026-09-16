@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -143,15 +144,22 @@ func (c *Cache) finishCall(key string, call *cacheCall, value []byte, err error)
 }
 
 func (c *Cache) load(key string, loader func() ([]byte, error)) ([]byte, error) {
+	return c.loadContext(key, func(context.Context) ([]byte, error) { return loader() }, context.Background())
+}
+
+func (c *Cache) loadContext(key string, loader func(context.Context) ([]byte, error), ctx context.Context) ([]byte, error) {
 	if c == nil {
-		return loader()
+		return loader(ctx)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	call, owner := c.beginCall(key)
 	if !owner {
 		<-call.done
 		return append([]byte(nil), call.value...), call.err
 	}
-	value, err := loader()
+	value, err := loader(ctx)
 	c.finishCall(key, call, value, err)
 	return value, err
 }
@@ -159,8 +167,15 @@ func (c *Cache) load(key string, loader func() ([]byte, error)) ([]byte, error) 
 // refresh starts one best-effort background load. It returns false when an
 // equivalent request is already running.
 func (c *Cache) refresh(key string, loader func() ([]byte, error), run func(func())) bool {
+	return c.refreshContext(key, func(context.Context) ([]byte, error) { return loader() }, context.Background(), run)
+}
+
+func (c *Cache) refreshContext(key string, loader func(context.Context) ([]byte, error), ctx context.Context, run func(func())) bool {
 	if c == nil {
 		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	call, owner := c.beginCall(key)
 	if !owner {
@@ -171,7 +186,7 @@ func (c *Cache) refresh(key string, loader func() ([]byte, error), run func(func
 		background = func(fn func()) { go fn() }
 	}
 	background(func() {
-		value, err := loader()
+		value, err := loader(context.WithoutCancel(ctx))
 		c.finishCall(key, call, value, err)
 	})
 	return true

@@ -37,6 +37,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/notification"
 	"github.com/shijie152/ani-rss/go-backend/internal/ownership"
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
+	"github.com/shijie152/ani-rss/go-backend/internal/scheduler"
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
@@ -66,9 +67,13 @@ type App struct {
 	logger        *slog.Logger
 	notifications *notification.Dispatcher
 	sourceCache   *source.Cache
+	metadataCache *metadata.Cache
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
 	backgroundWG  sync.WaitGroup
+	schedulerMu   sync.Mutex
+	schedulerWG   sync.WaitGroup
+	schedulerStop context.CancelFunc
 	ownedDomains  []string
 	version       string
 	logBuffer     *logBuffer
@@ -136,7 +141,8 @@ func New(options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: source.NewCache(256), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: source.NewCache(256), metadataCache: metadata.NewCache(512), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app.metadataCache.WithBackground(app.runBackground)
 	app.logger.Info("Go backend initialized")
 	app.subscriptions.ConfigureSideEffects(func(ctx context.Context) (subscription.TaskManager, error) {
 		coordinator, factoryErr := app.newCoordinator()
@@ -218,6 +224,12 @@ func (a *App) AcquireDomains(domains ...string) error {
 }
 
 func (a *App) Close() {
+	a.schedulerMu.Lock()
+	if a.schedulerStop != nil {
+		a.schedulerStop()
+	}
+	a.schedulerMu.Unlock()
+	a.schedulerWG.Wait()
 	a.backgroundWG.Wait()
 	if a.logFile != nil {
 		_ = a.logFile.Close()
@@ -396,59 +408,54 @@ func (a *App) repairLoadedSubscriptions(items []model.Ani) error {
 // The method blocks until ctx is cancelled and is intended to run in one
 // goroutine from the command entrypoint.
 func (a *App) RunSchedulers(ctx context.Context) {
-	_, rssOwned := a.ownership.Owner("rss")
-	_, sourcesOwned := a.ownership.Owner("sources")
-	if !rssOwned && !sourcesOwned {
+	schedulerContext, cancel := context.WithCancel(ctx)
+	a.schedulerMu.Lock()
+	if a.schedulerStop != nil {
+		a.schedulerMu.Unlock()
+		cancel()
 		return
 	}
-	var rssC <-chan time.Time
-	var rssTicker *time.Ticker
-	if rssOwned {
-		interval := time.Duration(appconfig.Int(a.config.Snapshot(), "rssSleepMinutes")) * time.Minute
-		if interval <= 0 {
-			interval = time.Minute
-		}
-		rssTicker = time.NewTicker(interval)
-		rssC = rssTicker.C
-		defer rssTicker.Stop()
+	a.schedulerStop = cancel
+	a.schedulerWG.Add(1)
+	a.schedulerMu.Unlock()
+	defer func() {
+		cancel()
+		a.schedulerMu.Lock()
+		a.schedulerStop = nil
+		a.schedulerMu.Unlock()
+		a.schedulerWG.Done()
+	}()
+	interval := time.Duration(appconfig.Int(a.config.Snapshot(), "rssSleepMinutes")) * time.Minute
+	if interval <= 0 {
+		interval = time.Minute
 	}
-	var sourceC <-chan time.Time
-	var sourceTicker *time.Ticker
-	if sourcesOwned {
-		// Source catalogues are deliberately refreshed independently of the RSS
-		// scheduler. A slow upstream must never delay RSS polling or an HTTP
-		// request; the cache still decides whether the warm-up contacts upstream.
-		sourceTicker = time.NewTicker(10 * time.Minute)
-		sourceC = sourceTicker.C
-		defer sourceTicker.Stop()
-		a.runBackground(a.prewarmSourceCatalogs)
+	jobs := []scheduler.DomainJob{
+		{Domain: "rss", Job: scheduler.Job{Interval: interval, Initial: true, Run: func(jobCtx context.Context) {
+			if !appconfig.Bool(a.config.Snapshot(), "rss") {
+				return
+			}
+			if err := a.refreshAllSubscriptions(jobCtx); err != nil && !errors.Is(err, context.Canceled) {
+				a.logger.Warn("scheduled RSS refresh failed", "error", err)
+			}
+		}}},
+		{Domain: "sources", Job: scheduler.Job{Interval: 10 * time.Minute, Initial: true, Run: func(jobCtx context.Context) {
+			// Source catalogues are independent from RSS. Running inside the
+			// scheduler worker prevents overlapping prewarms.
+			a.prewarmSourceCatalogsContext(jobCtx)
+		}}},
 	}
-	runRSS := func() {
-		if !rssOwned || !appconfig.Bool(a.config.Snapshot(), "rss") {
-			return
-		}
-		if err := a.refreshAllSubscriptions(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			a.logger.Warn("scheduled RSS refresh failed", "error", err)
-		}
-	}
-	runRSS()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-rssC:
-			runRSS()
-		case <-sourceC:
-			a.runBackground(a.prewarmSourceCatalogs)
-		}
-	}
+	scheduler.NewOwned(a.ownership, jobs...).Run(schedulerContext)
 }
 
 // prewarmSourceCatalogs populates the shared source cache with the catalogues
-// used by the home pages. It is run in the backend's background worker so a
-// third-party timeout cannot hold up RSS refreshes or the scheduler loop.
+// used by the home pages. Scheduler owns the worker, so a third-party timeout
+// cannot hold up RSS refreshes or the scheduler loop.
 func (a *App) prewarmSourceCatalogs() {
-	client, err := a.sourceClient()
+	a.prewarmSourceCatalogsContext(context.Background())
+}
+
+func (a *App) prewarmSourceCatalogsContext(ctx context.Context) {
+	client, err := a.sourceClientContext(ctx)
 	if err != nil {
 		a.logger.Warn("source cache warm-up setup failed", "error", err)
 		return
@@ -852,13 +859,19 @@ func (a *App) downloadPath(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, path, "success")
 }
 
-func (a *App) sourceClient() (*source.Client, error) {
+func (a *App) sourceClient() (source.Discovery, error) {
+	return a.sourceClientContext(context.Background())
+}
+
+func (a *App) sourceClientContext(ctx context.Context) (source.Discovery, error) {
 	cfg := a.config.Snapshot()
 	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
 	if err != nil {
 		return nil, err
 	}
+	metadataClient := metadata.New(cfg, client).WithCache(a.metadataCache)
 	return source.New(source.Options{
+		Context:         ctx,
 		MikanHost:       appconfig.String(cfg, "mikanHost"),
 		AniBTHost:       defaultString(appconfig.String(cfg, "aniBTHost"), "https://anibt.net"),
 		AnimeGardenHost: defaultString(appconfig.String(cfg, "animeGardenHost"), "https://api.animes.garden"),
@@ -870,6 +883,7 @@ func (a *App) sourceClient() (*source.Client, error) {
 		Subscriptions:   a.subscriptions.Items,
 		Cache:           a.sourceCache,
 		Background:      a.runBackground,
+		Metadata:        metadataClient,
 	}), nil
 }
 
@@ -884,7 +898,7 @@ func (a *App) mikan(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "Mikan 参数格式异常: "+err.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result map[string]any
 		result, err = client.Mikan(text, season)
@@ -902,7 +916,7 @@ func (a *App) mikanGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.MikanGroup(target)
@@ -920,7 +934,7 @@ func (a *App) aniBT(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result map[string]any
 		result, err = client.AniBT(input)
@@ -938,7 +952,7 @@ func (a *App) aniBTGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AniBTGroup(bgmID)
@@ -951,7 +965,7 @@ func (a *App) aniBTGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) animeGardenList(w http.ResponseWriter, r *http.Request) {
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AnimeGardenList(r.URL.Query().Get("bgmUrl"))
@@ -969,7 +983,7 @@ func (a *App) animeGardenGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AnimeGardenGroup(bgmID)
@@ -987,7 +1001,7 @@ func (a *App) searchBgm(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.SearchBangumi(name)
@@ -1005,7 +1019,7 @@ func (a *App) getAniBySubjectID(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result model.Ani
 		result, err = client.SubscriptionFromSubject(id)
@@ -1029,7 +1043,7 @@ func (a *App) getBGMTitle(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err == nil {
 		var result string
 		result, err = client.BGMTitle(item)
@@ -1057,63 +1071,20 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "RSS解析失败 RSS地址 不能为空")
 		return
 	}
-	client, err := a.sourceClient()
+	client, err := a.sourceClientContext(r.Context())
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
 	}
 	typeName := defaultString(input.Type, "mikan")
-	var resolvedMikan model.Ani
-	id := source.SubjectID(input.BGMURL)
-	parsedURL, parseErr := url.Parse(input.URL)
-	if parseErr != nil {
-		writeResult(w, http.StatusInternalServerError, nil, "RSS地址格式异常: "+parseErr.Error())
+	resolved, resolveErr := client.ResolveRSSSubscription(typeName, input.URL, input.BGMURL, input.Subgroup)
+	if resolveErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(resolveErr))
 		return
 	}
-	switch typeName {
-	case "mikan":
-		// Java only loads the Mikan detail page when both optional fields are
-		// absent. The normal single-add UI already supplies the linked BGM URL
-		// and subgroup; batch-add supplies neither and therefore takes this
-		// branch.
-		if strings.TrimSpace(input.BGMURL) == "" && strings.TrimSpace(input.Subgroup) == "" {
-			resolved, resolveErr := client.ResolveMikanSubscription(input.URL)
-			if resolveErr == nil {
-				input.BGMURL = resolved.BGMURL
-				resolvedMikan = resolved
-				if input.Subgroup == "" {
-					input.Subgroup = resolved.Subgroup
-				}
-				id = source.SubjectID(input.BGMURL)
-			} else {
-				writeResult(w, http.StatusInternalServerError, nil, sourceError(resolveErr))
-				return
-			}
-		}
-	case "ani-bt":
-		if values, exists := parsedURL.Query()["bgmId"]; exists && len(values) > 0 {
-			input.BGMURL = "https://bgm.tv/subject/" + values[0]
-		} else {
-			input.BGMURL = ""
-		}
-		if strings.TrimSpace(input.Subgroup) == "" {
-			if values, exists := parsedURL.Query()["groupSlug"]; exists && len(values) > 0 {
-				input.Subgroup = values[0]
-			}
-		}
-	case "anime-garden":
-		if values, exists := parsedURL.Query()["subject"]; exists && len(values) > 0 {
-			input.BGMURL = "https://bgm.tv/subject/" + values[0]
-		} else {
-			input.BGMURL = ""
-		}
-		if values, exists := parsedURL.Query()["fansub"]; exists && len(values) > 0 {
-			input.Subgroup = values[0]
-		}
-	default:
-		// Java's `other` branch uses only the BGM URL supplied in the body;
-		// query parameters on the RSS URL are not inferred.
-	}
+	input.BGMURL, input.Subgroup = resolved.BGMURL, resolved.Subgroup
+	resolvedMikan := resolved
+	id := source.SubjectID(input.BGMURL)
 	id = source.SubjectID(input.BGMURL)
 	if id == "" {
 		writeResult(w, http.StatusInternalServerError, nil, "bgmUrl 不能为空")
@@ -1136,11 +1107,7 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		item.Subgroup = "未知字幕组"
 	}
 	if item.Subgroup == "未知字幕组" {
-		if resources, fetchErr := a.rssConversionResources(r.Context(), item.URL, &item); fetchErr == nil {
-			if subgroup := inferRSSSubgroup(resources); subgroup != "" {
-				item.Subgroup = subgroup
-			}
-		}
+		_, _ = a.rssConversionResources(r.Context(), item.URL, &item)
 	}
 	if item.Subgroup == "" {
 		item.Subgroup = "未知字幕组"
@@ -1183,53 +1150,20 @@ func (a *App) rssConversionResources(ctx context.Context, feedURL string, item *
 	if err != nil {
 		return nil, err
 	}
-	body, err := rss.Fetch(ctx, client, feedURL, appconfig.Int(cfg, "downloadRetry"))
-	if err != nil {
-		return nil, err
-	}
-	resources, err := rss.Parse(body, item.Subgroup, feedURL)
+	intake := &rss.Intake{Config: a.config, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry")}
+	resources, err := intake.CollectFeed(ctx, *item, rss.Feed{URL: feedURL, Subgroup: item.Subgroup, Master: true})
 	if err != nil {
 		return nil, err
 	}
 	if item.Subgroup == "未知字幕组" {
-		if subgroup := inferRSSSubgroup(resources); subgroup != "" {
-			item.Subgroup = subgroup
-			for index := range resources {
-				resources[index].Subgroup = subgroup
+		for _, resource := range resources {
+			if subgroup := strings.TrimSpace(resource.Subgroup); subgroup != "" && subgroup != "未知字幕组" {
+				item.Subgroup = subgroup
+				break
 			}
 		}
 	}
-	options := rss.MatchOptions{
-		GlobalExclude:    appconfig.Strings(cfg, "exclude"),
-		DownloadNew:      item.DownloadNew,
-		SkipHalf:         appconfig.Bool(cfg, "skip5"),
-		DelayedMinutes:   appconfig.Int(cfg, "delayedDownload"),
-		CustomEpisode:    item.CustomEpisode,
-		CustomEpisodeRE:  item.CustomEpisodeStr,
-		CustomEpisodeIdx: item.CustomEpisodeGroupIndex,
-		Coexist:          appconfig.Bool(cfg, "coexist"),
-	}
-	if item.CustomPriorityKeywordsEnable {
-		options.PriorityKeywords = item.CustomPriorityKeywords
-	} else if appconfig.Bool(cfg, "priorityKeywordsEnable") {
-		options.PriorityKeywords = appconfig.Strings(cfg, "priorityKeywords")
-	}
-	return rss.Match(resources, *item, options), nil
-}
-
-func inferRSSSubgroup(resources []model.Resource) string {
-	pattern := regexp.MustCompile(`^\[([^]]+)]`)
-	for _, resource := range resources {
-		name := strings.TrimSpace(resource.Title)
-		if match := pattern.FindStringSubmatch(name); len(match) > 1 && strings.TrimSpace(match[1]) != "" {
-			return strings.TrimSpace(match[1])
-		}
-		name = filepath.Base(name)
-		if match := pattern.FindStringSubmatch(name); len(match) > 1 && strings.TrimSpace(match[1]) != "" {
-			return strings.TrimSpace(match[1])
-		}
-	}
-	return ""
+	return resources, nil
 }
 
 var defaultSubscriptionExclude = []string{"720[Pp]", `\d-\d`, "合集", "特别篇"}
@@ -1941,7 +1875,7 @@ func (a *App) metadataClient() (*metadata.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return metadata.New(cfg, client), nil
+	return metadata.New(cfg, client).WithCache(a.metadataCache), nil
 }
 
 func (a *App) mediaService() (*media.Service, error) {

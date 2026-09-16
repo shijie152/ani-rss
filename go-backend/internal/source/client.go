@@ -4,6 +4,7 @@
 package source
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,10 +19,12 @@ import (
 
 	"golang.org/x/net/html"
 
+	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 )
 
 type Options struct {
+	Context         context.Context
 	MikanHost       string
 	AniBTHost       string
 	AnimeGardenHost string
@@ -40,7 +43,9 @@ type Options struct {
 	Config        model.Config
 	HTTPClient    *http.Client
 	Subscriptions func() []model.Ani
-	Retries       int
+	// Metadata is the shared metadata authority used by the application.
+	Metadata *metadata.Client
+	Retries  int
 }
 
 type Client struct {
@@ -51,6 +56,8 @@ type Client struct {
 	retries                                                   int
 	cache                                                     *Cache
 	background                                                func(func())
+	metadataClient                                            *metadata.Client
+	context                                                   context.Context
 }
 
 func New(options Options) *Client {
@@ -62,42 +69,48 @@ func New(options Options) *Client {
 	if retries < 1 {
 		retries = 3
 	}
+	requestContext := options.Context
+	if requestContext == nil {
+		requestContext = context.Background()
+	}
 	return &Client{
-		mikanHost:     strings.TrimRight(options.MikanHost, "/"),
-		aniBTHost:     strings.TrimRight(options.AniBTHost, "/"),
-		gardenHost:    strings.TrimRight(options.AnimeGardenHost, "/"),
-		bangumiAPI:    strings.TrimRight(options.BangumiAPI, "/"),
-		bgmCoverURL:   strings.TrimRight(options.BGMCoverURL, "/"),
-		config:        options.Config,
-		httpClient:    httpClient,
-		subscriptions: options.Subscriptions,
-		retries:       retries,
-		cache:         options.Cache,
-		background:    options.Background,
+		mikanHost:      strings.TrimRight(options.MikanHost, "/"),
+		aniBTHost:      strings.TrimRight(options.AniBTHost, "/"),
+		gardenHost:     strings.TrimRight(options.AnimeGardenHost, "/"),
+		bangumiAPI:     strings.TrimRight(options.BangumiAPI, "/"),
+		bgmCoverURL:    strings.TrimRight(options.BGMCoverURL, "/"),
+		config:         options.Config,
+		httpClient:     httpClient,
+		subscriptions:  options.Subscriptions,
+		retries:        retries,
+		cache:          options.Cache,
+		background:     options.Background,
+		metadataClient: options.Metadata,
+		context:        requestContext,
 	}
 }
 
-func (c *Client) cachedJSON(key string, freshFor, staleFor time.Duration, loader func() (any, error)) (any, error) {
-	load := func() ([]byte, error) {
-		value, err := loader()
+func (c *Client) cachedJSON(key string, freshFor, staleFor time.Duration, loader func(context.Context) (any, error)) (any, error) {
+	load := func(ctx context.Context) ([]byte, error) {
+		value, err := loader(ctx)
 		if err != nil {
 			return nil, err
 		}
 		return json.Marshal(value)
 	}
 	if c.cache == nil {
-		return loader()
+		return loader(c.context)
 	}
 	if raw, state := c.cache.lookup(key, freshFor, staleFor); state != cacheMiss {
 		var value any
 		if err := json.Unmarshal(raw, &value); err == nil {
 			if state == cacheStale {
-				_ = c.cache.refresh(key, load, c.background)
+				_ = c.cache.refreshContext(key, load, c.context, c.background)
 			}
 			return value, nil
 		}
 	}
-	raw, err := c.cache.load(key, load)
+	raw, err := c.cache.loadContext(key, load, c.context)
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +150,8 @@ func (c *Client) Mikan(text string, season map[string]any) (map[string]any, erro
 	if match := regexp.MustCompile(`^id: ([0-9]+)$`).FindStringSubmatch(trimmedText); len(match) == 2 {
 		id := match[1]
 		target := c.mikanHost + "/Home/Bangumi/" + url.PathEscape(id)
-		value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
-			body, getErr := c.get(target)
+		value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func(loadCtx context.Context) (any, error) {
+			body, getErr := c.get(loadCtx, target)
 			if getErr != nil {
 				return nil, getErr
 			}
@@ -178,8 +191,8 @@ func (c *Client) Mikan(text string, season map[string]any) (map[string]any, erro
 	if trimmedText != "" {
 		freshFor, staleFor = 30*time.Minute, 24*time.Hour
 	}
-	value, err := c.cachedJSON("mikan:catalog:"+target, freshFor, staleFor, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("mikan:catalog:"+target, freshFor, staleFor, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -196,8 +209,8 @@ func (c *Client) MikanGroup(target string) ([]map[string]any, error) {
 	if target == "" {
 		return nil, errors.New("Mikan URL is empty")
 	}
-	value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -249,8 +262,8 @@ func (c *Client) AniBT(query map[string]any) (map[string]any, error) {
 	values.Set("bgmId", bgmID)
 	values.Set("query", title)
 	target := c.aniBTHost + "/api/seasons/anime?" + values.Encode()
-	value, err := c.cachedJSON("anibt:catalog:"+target, 10*time.Minute, 24*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("anibt:catalog:"+target, 10*time.Minute, 24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -306,8 +319,8 @@ func (c *Client) AniBT(query map[string]any) (map[string]any, error) {
 
 func (c *Client) AniBTGroup(bgmID string) ([]map[string]any, error) {
 	target := c.aniBTHost + "/api/anime/groups?bgmId=" + url.QueryEscape(bgmID)
-	value, err := c.cachedJSON("anibt:detail:"+target, 15*time.Minute, 6*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("anibt:detail:"+target, 15*time.Minute, 6*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -359,8 +372,8 @@ func (c *Client) AnimeGardenList(bgmURL string) ([]map[string]any, error) {
 		return []map[string]any{{"weekLabel": "搜索", "subjects": []any{subject}}}, nil
 	}
 	target := c.gardenHost + "/subjects"
-	value, err := c.cachedJSON("animegarden:catalog:"+target, 24*time.Hour, 7*24*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("animegarden:catalog:"+target, 24*time.Hour, 7*24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -411,8 +424,8 @@ func (c *Client) bangumiCoverCache() map[string]any {
 	if c.bgmCoverURL == "" {
 		return nil
 	}
-	value, err := c.cachedJSON("bangumi:covers:"+c.bgmCoverURL, 6*time.Hour, 7*24*time.Hour, func() (any, error) {
-		body, getErr := c.get(c.bgmCoverURL)
+	value, err := c.cachedJSON("bangumi:covers:"+c.bgmCoverURL, 6*time.Hour, 7*24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, c.bgmCoverURL)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -445,8 +458,8 @@ func bangumiCoverURL(value any) string {
 func (c *Client) AnimeGardenGroup(bgmID string) ([]map[string]any, error) {
 	values := url.Values{"subject": []string{bgmID}, "pageSize": []string{"200"}, "duplicate": []string{"false"}}
 	target := c.gardenHost + "/resources?" + values.Encode()
-	value, err := c.cachedJSON("animegarden:resources:"+target, time.Hour, 6*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("animegarden:resources:"+target, time.Hour, 6*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -556,9 +569,16 @@ func (c *Client) SearchBangumi(name string) ([]map[string]any, error) {
 	if strings.TrimSpace(name) == "" {
 		return []map[string]any{}, nil
 	}
+	if c.metadataClient != nil {
+		result, err := c.metadataClient.SearchBangumi(c.context, name)
+		if err != nil {
+			return []map[string]any{}, nil
+		}
+		return result, nil
+	}
 	target := c.bangumiAPI + "/search/subject/" + url.PathEscape(strings.ReplaceAll(name, "1/2", "½")) + "?type=2&max_results=25&responseGroup=small"
-	value, err := c.cachedJSON("bangumi:search:"+target, time.Hour, 24*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("bangumi:search:"+target, time.Hour, 24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -583,9 +603,12 @@ func (c *Client) SearchBangumi(name string) ([]map[string]any, error) {
 }
 
 func (c *Client) BangumiSubject(id string) (map[string]any, error) {
+	if c.metadataClient != nil {
+		return c.metadataClient.Subject(c.context, id)
+	}
 	target := c.bangumiAPI + "/v0/subjects/" + url.PathEscape(id)
-	value, err := c.cachedJSON("bangumi:subject:"+target, 6*time.Hour, 7*24*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("bangumi:subject:"+target, 6*time.Hour, 7*24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -673,14 +696,17 @@ func (c *Client) ResolveMikanSubscription(rssURL string) (model.Ani, error) {
 		return model.Ani{}, errors.New("Mikan RSS 缺少 bangumiId")
 	}
 	target := c.mikanHost + "/Home/Bangumi/" + url.PathEscape(mikanID)
-	body, err := c.get(target)
+	value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return c.mikanDetail(target, body)
+	})
 	if err != nil {
 		return model.Ani{}, err
 	}
-	detail, err := c.mikanDetail(target, body)
-	if err != nil {
-		return model.Ani{}, err
-	}
+	detail := mapValue(value)
 	var mikanInfo map[string]any
 	if weeks, ok := detail["weeks"].([]any); ok && len(weeks) > 0 {
 		if week, ok := weeks[0].(map[string]any); ok {
@@ -702,6 +728,51 @@ func (c *Client) ResolveMikanSubscription(rssURL string) (model.Ani, error) {
 				resolved.Subgroup = stringValue(group["label"])
 				break
 			}
+		}
+	}
+	return resolved, nil
+}
+
+// ResolveRSSSubscription normalizes source-specific RSS URL parameters before
+// the backend turns the result into a subscription. Keeping this here means
+// handlers do not need to know how Mikan, AniBT, or AnimeGarden encode their
+// Bangumi and subgroup identifiers.
+func (c *Client) ResolveRSSSubscription(typeName, rssURL, bgmURL, subgroup string) (model.Ani, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rssURL))
+	if err != nil {
+		return model.Ani{}, fmt.Errorf("RSS地址格式异常: %w", err)
+	}
+	resolved := model.Ani{BGMURL: bgmURL, Subgroup: subgroup}
+	switch typeName {
+	case "mikan":
+		if strings.TrimSpace(bgmURL) == "" && strings.TrimSpace(subgroup) == "" {
+			value, resolveErr := c.ResolveMikanSubscription(rssURL)
+			if resolveErr != nil {
+				return model.Ani{}, resolveErr
+			}
+			resolved.BGMURL = value.BGMURL
+			resolved.Subgroup = value.Subgroup
+			resolved.MikanTitle = value.MikanTitle
+		}
+	case "ani-bt":
+		if values, exists := parsed.Query()["bgmId"]; exists && len(values) > 0 {
+			resolved.BGMURL = "https://bgm.tv/subject/" + values[0]
+		} else {
+			resolved.BGMURL = ""
+		}
+		if strings.TrimSpace(resolved.Subgroup) == "" {
+			if values, exists := parsed.Query()["groupSlug"]; exists && len(values) > 0 {
+				resolved.Subgroup = values[0]
+			}
+		}
+	case "anime-garden":
+		if values, exists := parsed.Query()["subject"]; exists && len(values) > 0 {
+			resolved.BGMURL = "https://bgm.tv/subject/" + values[0]
+		} else {
+			resolved.BGMURL = ""
+		}
+		if values, exists := parsed.Query()["fansub"]; exists && len(values) > 0 {
+			resolved.Subgroup = values[0]
 		}
 	}
 	return resolved, nil
@@ -752,9 +823,12 @@ func (c *Client) BGMTitle(item model.Ani) (string, error) {
 }
 
 func (c *Client) subjectEpisodeCount(id string) (int, error) {
+	if c.metadataClient != nil {
+		return c.metadataClient.EpisodeCount(c.context, id)
+	}
 	target := c.bangumiAPI + "/v0/episodes?subject_id=" + url.QueryEscape(id) + "&type=0&limit=1000&offset=0"
-	value, err := c.cachedJSON("bangumi:episodes:"+target, time.Hour, 24*time.Hour, func() (any, error) {
-		body, getErr := c.get(target)
+	value, err := c.cachedJSON("bangumi:episodes:"+target, time.Hour, 24*time.Hour, func(loadCtx context.Context) (any, error) {
+		body, getErr := c.get(loadCtx, target)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -928,10 +1002,13 @@ func stripYearSuffix(value string) string {
 	return regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`).ReplaceAllString(strings.TrimSpace(value), "")
 }
 
-func (c *Client) get(target string) ([]byte, error) {
+func (c *Client) get(ctx context.Context, target string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 	for attempt := 0; attempt < c.retries; attempt++ {
-		request, err := http.NewRequest(http.MethodGet, target, nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -947,7 +1024,11 @@ func (c *Client) get(target string) ([]byte, error) {
 			lastErr = err
 		}
 		if attempt+1 < c.retries {
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
+			}
 		}
 	}
 	return nil, lastErr
