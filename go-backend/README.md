@@ -3,6 +3,15 @@
 The Go service is the final public HTTP entry point. It serves the existing Vue
 UI and all public API routes without a Java runtime.
 
+## Code map
+
+- Route table: `internal/backend/app.go` (`Routes`, ~line 484). Handlers stay thin; logic lives in the owning package.
+- Scheduler entry: `RunSchedulers` (app.go ~line 411) — RSS refresh, source prewarm, and the download-completion pass.
+- Download completion pipeline (Java `RenameTask`): `internal/completion/`, wired at `runCompletionPass` (app.go ~line 1894).
+- Downloader adapters (qBittorrent/Transmission/Aria2/OpenList): `internal/downloader/`.
+- Subscription/RSS matching/submission: `internal/subscription/`, `internal/rss/`. Media scrape/organize: `internal/media/`.
+- Config + persistence: `internal/config/`, `internal/store/` (SQLite).
+
 From the repository root, build the UI and run the service with:
 
 ```sh

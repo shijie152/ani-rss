@@ -50,3 +50,6 @@ logs
 ani-rss-update.exe
 *.versionsBackup
 .pnpm-store
+
+### Agent scratch temp ###
+.scratch/.tmp/
