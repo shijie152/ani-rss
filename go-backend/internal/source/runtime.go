@@ -17,6 +17,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 )
 
 // Options controls the shared runtime used by all source adapters.
@@ -253,7 +254,7 @@ func buildGroupRegex(titles []string) map[string]any {
 	for _, title := range titles {
 		items := make([]map[string]any, 0)
 		for _, pattern := range patterns {
-			matched, err := regexp.MatchString(pattern, title)
+			matched, err := regexutil.MatchString(pattern, title)
 			if err != nil || !matched {
 				continue
 			}

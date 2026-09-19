@@ -554,10 +554,14 @@ func (s *Service) moveCompleted(path string, ani model.Ani) (string, error) {
 	if ani.OVA || !ani.Completed || ani.Enable || ani.TotalEpisodeNumber < 1 || ani.CurrentEpisodeNumber < ani.TotalEpisodeNumber {
 		return "", nil
 	}
-	if s.Config == nil || !appconfig.Bool(s.Config.Snapshot(), "autoDisabled") || !appconfig.Bool(s.Config.Snapshot(), "completed") {
+	if s.Config == nil {
 		return "", nil
 	}
-	template := appconfig.String(s.Config.Snapshot(), "completedPathTemplate")
+	snap := s.Config.Snapshot()
+	if !appconfig.Bool(snap, "autoDisabled") || !appconfig.Bool(snap, "completed") {
+		return "", nil
+	}
+	template := appconfig.String(snap, "completedPathTemplate")
 	if ani.CustomCompleted && strings.TrimSpace(ani.CustomCompletedPathTemplate) != "" {
 		template = ani.CustomCompletedPathTemplate
 	}
@@ -698,6 +702,11 @@ func (s *Service) imageURL(value string) string {
 	return base + "/t/p/original" + value
 }
 
+var (
+	renameDelYearPattern   = regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`)
+	renameDelTmdbIDPattern = regexp.MustCompile(`\s*(?:\[tmdbid=\d+\]|\{tmdb-\d+\})`)
+)
+
 func buildFilename(ani model.Ani, value model.Metadata, original string, identity mediaIdentity, config appconfig.Reader) string {
 	template := "${title} S${seasonFormat}E${episodeFormat}"
 	if ani.CustomRenameTemplateEnable && strings.TrimSpace(ani.CustomRenameTemplate) != "" {
@@ -725,10 +734,10 @@ func buildFilename(ani model.Ani, value model.Metadata, original string, identit
 	if config != nil {
 		cfg := config.Snapshot()
 		if appconfig.Bool(cfg, "renameDelYear") {
-			result = strings.TrimSpace(regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`).ReplaceAllString(result, ""))
+			result = strings.TrimSpace(renameDelYearPattern.ReplaceAllString(result, ""))
 		}
 		if appconfig.Bool(cfg, "renameDelTmdbId") {
-			result = strings.TrimSpace(regexp.MustCompile(`\s*(?:\[tmdbid=\d+\]|\{tmdb-\d+\})`).ReplaceAllString(result, ""))
+			result = strings.TrimSpace(renameDelTmdbIDPattern.ReplaceAllString(result, ""))
 		}
 		if limit := appconfig.Int(cfg, "maxFileNameLength"); limit > 0 {
 			result = truncateRunes(result, limit)

@@ -140,7 +140,7 @@ func matchesAll(patterns []string, title string) bool {
 		if pattern == "" {
 			continue
 		}
-		if ok, err := regexp.MatchString(pattern, title); err != nil || !ok {
+		if ok, err := regexutil.MatchString(pattern, title); err != nil || !ok {
 			return false
 		}
 	}
@@ -149,7 +149,7 @@ func matchesAll(patterns []string, title string) bool {
 func matchesAny(patterns []string, title string) bool {
 	for _, pattern := range patterns {
 		if pattern != "" {
-			if ok, err := regexp.MatchString(pattern, title); err == nil && ok {
+			if ok, err := regexutil.MatchString(pattern, title); err == nil && ok {
 				return true
 			}
 		}

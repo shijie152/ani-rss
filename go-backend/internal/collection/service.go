@@ -18,6 +18,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/media"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 	"github.com/shijie152/ani-rss/go-backend/internal/torrent"
 )
 
@@ -217,7 +218,10 @@ func (s *Service) include(name string, ani model.Ani) bool {
 		}
 	}
 	if ani.GlobalExclude && s.Config != nil {
-		for _, pattern := range appconfig.Strings(s.Config.Snapshot(), "exclude") {
+		// Snapshot once per call, not once per rule — Snapshot deep-copies the
+		// config and include() runs once per file in a collection.
+		globalExclude := appconfig.Strings(s.Config.Snapshot(), "exclude")
+		for _, pattern := range globalExclude {
 			if value := mapPattern(pattern); value != "" && regexpMatch(value, name) {
 				return false
 			}
@@ -227,7 +231,7 @@ func (s *Service) include(name string, ani model.Ani) bool {
 }
 
 func regexpMatch(pattern, value string) bool {
-	matched, err := regexp.MatchString(pattern, value)
+	matched, err := regexutil.MatchString(pattern, value)
 	return err == nil && matched
 }
 func isSubtitle(name string) bool {

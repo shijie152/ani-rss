@@ -112,3 +112,32 @@ func compileCapturePattern(expression string, javaIndex int) (*regexp.Regexp, in
 	}
 	return compiled, javaIndex + shift, nil
 }
+
+// MatchString caches regexp compilation for the dynamic include/exclude/match
+// patterns the matcher, collection filter and source tagger evaluate once per
+// item. The pattern set is small and bounded (user-configured rules), so a
+// shared map turns repeated Compile+Match into a lookup. Same bound policy as
+// compiledPatterns: beyond the cap the cache is rebuilt.
+var (
+	matchPatternsMu sync.Mutex
+	matchPatterns   = map[string]*regexp.Regexp{}
+)
+
+func MatchString(pattern, value string) (bool, error) {
+	matchPatternsMu.Lock()
+	re, ok := matchPatterns[pattern]
+	if !ok {
+		var err error
+		re, err = regexp.Compile(pattern)
+		if err != nil {
+			matchPatternsMu.Unlock()
+			return false, err
+		}
+		if len(matchPatterns) >= compiledPatternCap {
+			matchPatterns = map[string]*regexp.Regexp{}
+		}
+		matchPatterns[pattern] = re
+	}
+	matchPatternsMu.Unlock()
+	return re.MatchString(value), nil
+}
