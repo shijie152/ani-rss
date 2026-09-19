@@ -2,6 +2,11 @@ name: build
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -39,11 +44,6 @@ jobs:
         uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Login to ghcr.io
         uses: docker/login-action@v4
         with:
@@ -58,9 +58,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: |
-            wushuo894/ani-rss:latest
-            ghcr.io/wushuo894/ani-rss:latest
-            wushuo894/ani-rss:${{ env.version }}
-            ghcr.io/wushuo894/ani-rss:${{ env.version }}
+            ghcr.io/shijie152/ani-rss:latest
+            ghcr.io/shijie152/ani-rss:${{ env.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
