@@ -146,8 +146,12 @@ func (q *QBittorrent) Add(ctx context.Context, resource model.Resource, savePath
 		return err
 	}
 	defer response.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if response.StatusCode < 200 || response.StatusCode >= 300 || (len(body) > 0 && strings.TrimSpace(string(body)) != "Ok") {
+	// Java's BaseDownload accepts any 2xx from /api/v2/torrents/add. qBittorrent
+	// v5 answers magnet adds asynchronously with HTTP 202 and a JSON body such as
+	// {"pending_count":1}, so the body is informational only; the status decides
+	// success. Treating non-"Ok" bodies as failures drops history/progress.
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 		return fmt.Errorf("qBittorrent add returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil

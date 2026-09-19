@@ -181,3 +181,24 @@ func TestQBittorrentWaitsForCompletionAndReportsFailure(t *testing.T) {
 		t.Fatalf("failed task=%#v err=%v", failedTask, err)
 	}
 }
+
+// qBittorrent v5 accepts magnet adds asynchronously: it answers HTTP 202 with a
+// JSON body like {"added_torrent_ids":[],"pending_count":1,...} instead of the
+// legacy "Ok" body. Java's HttpResponse::isOk treats any 2xx as success, so the
+// adapter must do the same or every magnet submission is reported as a failure
+// and subscription progress never advances.
+func TestQBittorrentAddAcceptsAcceptedMagnetResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/torrents/add" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}`))
+	}))
+	defer server.Close()
+	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	if err := adapter.Add(context.Background(), model.Resource{Title: "Demo", Magnet: "magnet:?xt=urn:btih:abc"}, "/media", []string{"ani-rss"}, false); err != nil {
+		t.Fatalf("Add() on 202 pending = %v, want nil", err)
+	}
+}
