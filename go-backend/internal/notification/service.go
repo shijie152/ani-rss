@@ -239,12 +239,46 @@ func eventKey(index int, cfg map[string]any, event Event) string {
 	}
 	return fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s", index, stringValue(cfg["notificationType"]), event.Ani.ID, event.Status, resource)
 }
+
+// notificationDedupTTL is how long a sent notification is suppressed, and
+// notificationDedupCap bounds the dedup map. The map only ever grew before:
+// markSent appended keys and nothing removed them, so a long-running process
+// leaked one entry per notification forever. Entries older than the TTL are
+// reaped on write, and the map is hard-capped as a second defence.
+const (
+	notificationDedupTTL = 24 * time.Hour
+	notificationDedupCap = 4096
+)
+
 func (d *Dispatcher) wasSent(key string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return time.Since(d.seen[key]) < 24*time.Hour
+	return time.Since(d.seen[key]) < notificationDedupTTL
 }
-func (d *Dispatcher) markSent(key string) { d.mu.Lock(); d.seen[key] = time.Now(); d.mu.Unlock() }
+
+func (d *Dispatcher) markSent(key string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := time.Now()
+	d.seen[key] = now
+	// Reap expired entries so the map cannot grow without bound.
+	for k, t := range d.seen {
+		if now.Sub(t) >= notificationDedupTTL {
+			delete(d.seen, k)
+		}
+	}
+	if len(d.seen) > notificationDedupCap {
+		// Hard cap: evict the oldest entries when a pathological burst exceeds it.
+		var oldestKey string
+		var oldest time.Time
+		for k, t := range d.seen {
+			if oldestKey == "" || t.Before(oldest) {
+				oldestKey, oldest = k, t
+			}
+		}
+		delete(d.seen, oldestKey)
+	}
+}
 
 func (d *Dispatcher) send(ctx context.Context, cfg map[string]any, event Event) error {
 	text := renderTemplate(d.Config, cfg, event)
