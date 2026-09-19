@@ -19,6 +19,12 @@ import (
 // subscription marker semantics behind a small source-specific interface.
 type MikanAdapter struct{ runtime *runtime }
 
+var (
+	mikanIDLinePattern      = regexp.MustCompile(`^id: ([0-9]+)$`)
+	mikanBangumiPathPattern = regexp.MustCompile(`(?i)/Home/Bangumi/[0-9]+/?$`)
+	mikanTrailingIDPattern  = regexp.MustCompile(`([0-9]+)$`)
+)
+
 func newMikanAdapter(rt *runtime) *MikanAdapter { return &MikanAdapter{runtime: rt} }
 
 func (a *MikanAdapter) ResolveSubscription(rssURL string) (model.Ani, error) {
@@ -52,7 +58,7 @@ func (a *MikanAdapter) Mikan(text string, season map[string]any) (map[string]any
 		return nil, errors.New("Mikan host is not configured")
 	}
 	trimmedText := strings.TrimSpace(text)
-	if match := regexp.MustCompile(`^id: ([0-9]+)$`).FindStringSubmatch(trimmedText); len(match) == 2 {
+	if match := mikanIDLinePattern.FindStringSubmatch(trimmedText); len(match) == 2 {
 		target := c.mikanHost + "/Home/Bangumi/" + url.PathEscape(match[1])
 		value, err := c.cachedJSON("mikan:detail:"+target, 15*time.Minute, 6*time.Hour, func(loadCtx context.Context) (any, error) {
 			body, getErr := c.get(loadCtx, target)
@@ -290,7 +296,7 @@ func isMikanBangumiLink(value string) bool {
 	if err != nil {
 		return false
 	}
-	return regexp.MustCompile(`(?i)/Home/Bangumi/[0-9]+/?$`).MatchString(parsed.Path)
+	return mikanBangumiPathPattern.MatchString(parsed.Path)
 }
 
 func parseTableItems(target string, table *html.Node) []any {
@@ -393,7 +399,7 @@ func mikanID(value string) string {
 }
 
 func trailingDigits(value string) string {
-	match := regexp.MustCompile(`([0-9]+)$`).FindStringSubmatch(strings.TrimRight(value, "/"))
+	match := mikanTrailingIDPattern.FindStringSubmatch(strings.TrimRight(value, "/"))
 	if len(match) > 1 {
 		return match[1]
 	}

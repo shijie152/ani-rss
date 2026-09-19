@@ -64,6 +64,11 @@ func (s *Service) Preview(info model.CollectionInfo) ([]model.Item, error) {
 	return items, nil
 }
 
+var (
+	collectionSubgroupPattern = regexp.MustCompile(`^\[(.+?)]`)
+	collectionRulePattern     = regexp.MustCompile(`^\{\{(.+)}}:(.+)$`)
+)
+
 func (s *Service) Subgroup(info model.CollectionInfo) (string, error) {
 	items, err := s.Preview(info)
 	if err != nil {
@@ -71,7 +76,7 @@ func (s *Service) Subgroup(info model.CollectionInfo) (string, error) {
 	}
 	for _, item := range items {
 		name := filepath.Base(filepath.ToSlash(item.Title))
-		if match := regexp.MustCompile(`^\[(.+?)]`).FindStringSubmatch(name); len(match) > 1 {
+		if match := collectionSubgroupPattern.FindStringSubmatch(name); len(match) > 1 {
 			return match[1], nil
 		}
 	}
@@ -192,7 +197,7 @@ func (s *Service) include(name string, ani model.Ani) bool {
 		return false
 	}
 	mapPattern := func(pattern string) string {
-		match := regexp.MustCompile(`^\{\{(.+)}}:(.+)$`).FindStringSubmatch(pattern)
+		match := collectionRulePattern.FindStringSubmatch(pattern)
 		if len(match) == 0 {
 			return pattern
 		}

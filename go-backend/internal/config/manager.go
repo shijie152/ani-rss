@@ -313,11 +313,37 @@ func merge(base, patch model.Config) model.Config {
 	return result
 }
 
+// clone deep-copies the config map. Snapshot() is on the hot path (HTTP
+// handlers, per-resource refresh, per-file scrape), so this must not round-trip
+// through JSON — a recursive map/slice copy is O(n) with no marshal overhead
+// and preserves the same shape the JSON round-trip produced (all values in a
+// Config are already JSON-compatible maps, slices, strings, numbers, bools).
 func clone(value any) model.Config {
-	data, _ := json.Marshal(value)
-	var result model.Config
-	_ = json.Unmarshal(data, &result)
+	src, _ := value.(model.Config)
+	result := make(model.Config, len(src))
+	for key, item := range src {
+		result[key] = cloneValue(item)
+	}
 	return result
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, v := range typed {
+			out[k] = cloneValue(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, v := range typed {
+			out[i] = cloneValue(v)
+		}
+		return out
+	default:
+		return typed
+	}
 }
 
 func objectString(value any, key string) string {

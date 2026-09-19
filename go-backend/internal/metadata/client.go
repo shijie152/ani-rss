@@ -420,9 +420,14 @@ func stripIdentifiers(value string) string {
 	return value
 }
 
+var (
+	renameDelTmdbID = regexp.MustCompile(` ?(\[tmdbid=\d+\]|\{tmdb-\d+\})`)
+	renameDelYear   = regexp.MustCompile(` ?\((?:19|20)\d{2}\)`)
+)
+
 func renameDelForLookup(value string) string {
 	value = strings.TrimSpace(value)
-	value = regexp.MustCompile(` ?(\[tmdbid=\d+\]|\{tmdb-\d+\})`).ReplaceAllString(value, "")
-	value = regexp.MustCompile(` ?\((?:19|20)\d{2}\)`).ReplaceAllString(value, "")
+	value = renameDelTmdbID.ReplaceAllString(value, "")
+	value = renameDelYear.ReplaceAllString(value, "")
 	return strings.TrimSpace(value)
 }

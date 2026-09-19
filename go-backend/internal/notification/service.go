@@ -311,8 +311,11 @@ func renderTemplate(global appconfig.Reader, cfg map[string]any, event Event) st
 	}
 	return strings.TrimSpace(template)
 }
+
+var episodeFromTextPattern = regexp.MustCompile(`(?i)(?:s\d+e|e|ep|第|[- ])\s*(\d+(?:\.5)?)`)
+
 func episodeFromText(text string) float64 {
-	match := regexp.MustCompile(`(?i)(?:s\d+e|e|ep|第|[- ])\s*(\d+(?:\.5)?)`).FindStringSubmatch(text)
+	match := episodeFromTextPattern.FindStringSubmatch(text)
 	if len(match) < 2 {
 		return 0
 	}

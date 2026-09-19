@@ -295,6 +295,8 @@ func inferBangumiSeason(info map[string]any) int {
 	return 0
 }
 
+var bangumiYearSuffix = regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`)
+
 var seasonPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)第\s*([一二三四五六七八九十百千万]+)\s*[季期]`),
 	regexp.MustCompile(`(?i)[Ss]eason\s*(\d+)`),
@@ -376,7 +378,7 @@ func yearFromDate(value string) int {
 }
 
 func stripYearSuffix(value string) string {
-	return regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`).ReplaceAllString(strings.TrimSpace(value), "")
+	return bangumiYearSuffix.ReplaceAllString(strings.TrimSpace(value), "")
 }
 
 func newID() string { return fmt.Sprintf("ani-%d", time.Now().UnixNano()) }

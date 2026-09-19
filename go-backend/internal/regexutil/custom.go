@@ -5,7 +5,9 @@ package regexutil
 import (
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 var errCaptureIndex = errors.New("custom episode capture index is invalid")
@@ -14,7 +16,45 @@ var errCaptureIndex = errors.New("custom episode capture index is invalid")
 // groups, then maps the requested Java capture index to the resulting Go
 // index. This keeps the configured customEpisodeGroupIndex stable even when a
 // non-capturing group appears before the episode capture.
+// compiledPatterns memoizes CompileCapturePattern results. Custom episode
+// expressions are few (one per subscription) but the matcher calls this once
+// per resource per refresh, so a cache turns a repeated parse+compile into a
+// map lookup. Bounded: beyond the cap the map is rebuilt rather than grown,
+// keeping a hostile or pathological expression set from leaking memory.
+var (
+	compiledPatternsMu sync.Mutex
+	compiledPatterns   = map[string]compiledPattern{}
+)
+
+type compiledPattern struct {
+	re    *regexp.Regexp
+	group int
+	err   error
+}
+
+const compiledPatternCap = 256
+
+// CompileCapturePattern replaces Java non-capturing groups with ordinary Go
+// groups, then maps the requested Java capture index to the resulting Go
+// index. This keeps the configured customEpisodeGroupIndex stable even when a
+// non-capturing group appears before the episode capture.
 func CompileCapturePattern(expression string, javaIndex int) (*regexp.Regexp, int, error) {
+	key := expression + "\x00" + strconv.Itoa(javaIndex)
+	compiledPatternsMu.Lock()
+	cached, ok := compiledPatterns[key]
+	if !ok {
+		re, group, err := compileCapturePattern(expression, javaIndex)
+		if len(compiledPatterns) >= compiledPatternCap {
+			compiledPatterns = map[string]compiledPattern{}
+		}
+		cached = compiledPattern{re: re, group: group, err: err}
+		compiledPatterns[key] = cached
+	}
+	compiledPatternsMu.Unlock()
+	return cached.re, cached.group, cached.err
+}
+
+func compileCapturePattern(expression string, javaIndex int) (*regexp.Regexp, int, error) {
 	if javaIndex < 1 {
 		return nil, 0, errCaptureIndex
 	}

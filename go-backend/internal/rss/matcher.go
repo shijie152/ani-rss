@@ -97,6 +97,8 @@ func Match(items []model.Resource, ani model.Ani, options MatchOptions) []model.
 	return result
 }
 
+var customEpisodeNumber = regexp.MustCompile(`[0-9]+([.]5)?`)
+
 func customEpisode(title, expression string, group int) (float64, bool) {
 	if strings.TrimSpace(expression) == "" || group < 1 {
 		return 0, false
@@ -112,7 +114,7 @@ func customEpisode(title, expression string, group int) (float64, bool) {
 	if group >= len(matches) {
 		return 0, false
 	}
-	number := regexp.MustCompile(`[0-9]+([.]5)?`).FindString(matches[group])
+	number := customEpisodeNumber.FindString(matches[group])
 	if number == "" {
 		return 0, false
 	}

@@ -85,6 +85,8 @@ type App struct {
 	shutdown      func(bool)
 }
 
+var titleYearSuffix = regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`)
+
 func New(options Options) (*App, error) {
 	applicationStore, err := store.NewSQLiteStore(options.ConfigDir)
 	if err != nil {
@@ -1327,7 +1329,7 @@ func (a *App) bangumiDisplayTitle(item model.Ani, tmdbValue model.Metadata) stri
 			year = dateYear(item.ReleaseDate)
 		}
 		if year > 0 {
-			title = regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`).ReplaceAllString(title, "")
+			title = titleYearSuffix.ReplaceAllString(title, "")
 			title = fmt.Sprintf("%s (%d)", title, year)
 		}
 	}

@@ -273,6 +273,8 @@ func buildGroupRegex(titles []string) map[string]any {
 
 // SubjectID extracts a Bangumi subject id from any of the source URL forms
 // used by the unchanged HTTP and MCP contracts.
+var trailingIDPattern = regexp.MustCompile(`/([0-9]+)(?:/)?$`)
+
 func SubjectID(value string) string { return subjectID(value) }
 
 func subjectID(value string) string {
@@ -283,7 +285,7 @@ func subjectID(value string) string {
 			}
 		}
 	}
-	match := regexp.MustCompile(`/([0-9]+)(?:/)?$`).FindStringSubmatch(strings.TrimRight(value, "/"))
+	match := trailingIDPattern.FindStringSubmatch(strings.TrimRight(value, "/"))
 	if len(match) > 1 {
 		return match[1]
 	}
