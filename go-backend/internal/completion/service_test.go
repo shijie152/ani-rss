@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 )
@@ -193,4 +192,47 @@ func TestDownloaderLoginFailureAbortsRound(t *testing.T) {
 	}
 }
 
-var _ = time.Now // keep time import if unused in future edits
+func TestDeleteRespectsToggles(t *testing.T) {
+	dl := &fakeDownloader{tasks: []model.Torrent{finishedTask("h", "/media/ani-1")}}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "delete": true, "deleteStandbyRSSOnly": true},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1", Title: "A"}}},
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, ok := dl.deleted["h"]; ok {
+		t.Fatal("deleteStandbyRSSOnly must skip deletion entirely (Java RenameTask continue)")
+	}
+}
+
+func TestAwaitStalledUPRequiresStoppedUP(t *testing.T) {
+	seeding := model.Torrent{Hash: "h", State: "stalledUP", Progress: 100, SavePath: "/media/ani-1"}
+	dl := &fakeDownloader{tasks: []model.Torrent{seeding}}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "delete": true, "awaitStalledUP": true},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1", Title: "A"}}},
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, ok := dl.deleted["h"]; ok {
+		t.Fatal("awaitStalledUP must only delete fully-seeded stoppedUP tasks")
+	}
+}
+
+func TestFinishedStateSet(t *testing.T) {
+	for state, want := range map[string]bool{
+		"queuedUP": true, "uploading": true, "stalledUP": true, "stoppedUP": true,
+		"downloading": false, "stalledDL": false, "pausedUP": false, "forcedUP": false, "error": false,
+	} {
+		if got := (model.Torrent{State: state, Progress: 100}).Finished(); got != want {
+			t.Errorf("state %s: got %v want %v", state, got, want)
+		}
+	}
+	if (model.Torrent{State: "stoppedUP", Progress: 40}).Finished() {
+		t.Error("progress<100 must not be finished")
+	}
+}

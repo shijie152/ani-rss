@@ -193,6 +193,20 @@ type Torrent struct {
 	CompletedOn int64    `json:"completedOn"`
 }
 
+// Finished reports whether the task reached a terminal upload/seeding state,
+// the exact set Java's TorrentsInfo.finished() accepts. A progress value
+// below 100 short-circuits to unfinished regardless of the reported state.
+func (t Torrent) Finished() bool {
+	if t.Progress > 0 && t.Progress < 100 {
+		return false
+	}
+	switch t.State {
+	case "queuedUP", "uploading", "stalledUP", "stoppedUP":
+		return true
+	}
+	return false
+}
+
 type Resource struct {
 	AniID       string     `json:"aniId,omitempty"`
 	Title       string     `json:"title"`

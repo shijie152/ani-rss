@@ -191,16 +191,31 @@ func (c *Coordinator) finishSubscription(ctx context.Context, ani model.Ani) {
 	}
 }
 
-// deleteTask retires the seeding task according to the delete toggles, the
-// same conditions Java applies after a successful rename+notification.
+// deleteTask retires the seeding task per Java's RenameTask+TorrentUtil.delete:
+// the delete toggle must be on, deleteStandbyRSSOnly skips entirely (standby
+// tasks are retired by the RSS pass instead), and the task must be eligible
+// for deletion (awaitStalledUP requires a fully seeded stoppedUP state).
 func (c *Coordinator) deleteTask(ctx context.Context, task model.Torrent) error {
 	if !appconfig.Bool(c.Config, "delete") {
 		return nil
 	}
-	if appconfig.Bool(c.Config, "deleteStandbyRSSOnly") && !hasTag(task.TagList, "备用RSS") {
+	if appconfig.Bool(c.Config, "deleteStandbyRSSOnly") {
+		return nil
+	}
+	if !c.allowDelete(task) {
 		return nil
 	}
 	return c.Downloader.Delete(ctx, task.Hash, false)
+}
+
+// allowDelete mirrors TorrentUtil.allowDelete: when awaitStalledUP is set the
+// task must have fully seeded (stoppedUP); otherwise any finished state is
+// eligible.
+func (c *Coordinator) allowDelete(task model.Torrent) bool {
+	if appconfig.Bool(c.Config, "awaitStalledUP") {
+		return task.State == "stoppedUP"
+	}
+	return task.Finished()
 }
 
 // findAni locates the subscription whose resolved download path owns the
@@ -240,17 +255,10 @@ func (c *Coordinator) subgroupFor(task model.Torrent, ani model.Ani) string {
 	return "未知字幕组"
 }
 
-// finished reports whether the task reached a terminal upload state, the same
-// set Java's TorrentsInfo.finished() accepts.
+// finished delegates to model.Torrent.Finished so the terminal-state set is
+// defined once and shared with the submission-side concurrency count.
 func finished(task model.Torrent) bool {
-	if task.Progress > 0 && task.Progress < 100 {
-		return false
-	}
-	switch task.State {
-	case "queuedUP", "uploading", "stalledUP", "stoppedUP", "pausedUP", "forcedUP":
-		return true
-	}
-	return false
+	return task.Finished()
 }
 
 func hasTag(tags []string, target string) bool {

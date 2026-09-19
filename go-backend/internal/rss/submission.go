@@ -124,7 +124,7 @@ func (s *Submitter) Submit(ctx context.Context, ani model.Ani, resources []model
 	}
 	if downloadCount > 0 {
 		for _, task := range tasks {
-			if !taskFinished(task) {
+			if !task.Finished() {
 				unfinished++
 			}
 		}
@@ -272,14 +272,4 @@ func (s *Submitter) localExists(ani model.Ani, resource model.Resource) bool {
 		s.SaveExist(context.Background(), ani, resource)
 	}
 	return true
-}
-
-// taskFinished mirrors the terminal-state set used to count unfinished tasks
-// for the downloadCount limit.
-func taskFinished(task model.Torrent) bool {
-	switch task.State {
-	case "queuedUP", "uploading", "stalledUP", "stoppedUP", "pausedUP", "forcedUP":
-		return true
-	}
-	return task.Progress >= 100
 }
