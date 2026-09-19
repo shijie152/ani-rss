@@ -41,6 +41,29 @@ func (f *fakeDownloader) Delete(_ context.Context, hash string, deleteFiles bool
 	return nil
 }
 
+// capableDownloader adds the optional in-downloader rename seams.
+type capableDownloader struct {
+	*fakeDownloader
+	files    []TaskFile
+	renamed  map[string]string
+	prioZero []int
+}
+
+func (d *capableDownloader) listFiles(context.Context, string) ([]TaskFile, error) {
+	return d.files, nil
+}
+func (d *capableDownloader) rename(_ context.Context, _, oldPath, newPath string) error {
+	if d.renamed == nil {
+		d.renamed = map[string]string{}
+	}
+	d.renamed[oldPath] = newPath
+	return nil
+}
+func (d *capableDownloader) setPrio(_ context.Context, _ string, index, _ int) error {
+	d.prioZero = append(d.prioZero, index)
+	return nil
+}
+
 type fakeScraper struct {
 	calls   int
 	lastAni model.Ani
@@ -234,5 +257,133 @@ func TestFinishedStateSet(t *testing.T) {
 	}
 	if (model.Torrent{State: "stoppedUP", Progress: 40}).Finished() {
 		t.Error("progress<100 must not be finished")
+	}
+}
+
+func TestRenameTaskFilesRenamesVideoAndSubtitle(t *testing.T) {
+	dl := &capableDownloader{
+		fakeDownloader: &fakeDownloader{tasks: []model.Torrent{finishedTask("h", "/media/ani-1")}},
+		files: []TaskFile{
+			{Index: 0, Name: "raw.ep01.mkv", Size: 100},
+			{Index: 1, Name: "raw.ep01.chs.ass", Size: 5},
+			{Index: 2, Name: "readme.txt", Size: 1},
+		},
+	}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "rename": true},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1", Title: "Show", Season: 1}}},
+		ListFiles:     dl.listFiles, RenameFileInTask: dl.rename, SetPriority: dl.setPrio,
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// task name is the canonical base; video keeps ext, subtitle keeps lang+ext.
+	if dl.renamed["raw.ep01.mkv"] != "Some Anime - 01.mkv" {
+		t.Fatalf("video rename: %v", dl.renamed)
+	}
+	if dl.renamed["raw.ep01.chs.ass"] != "Some Anime - 01.chs.ass" {
+		t.Fatalf("subtitle rename: %v", dl.renamed)
+	}
+	if _, ok := dl.renamed["readme.txt"]; ok {
+		t.Fatal("non-media file must not be renamed")
+	}
+	// RENAME tag applied after renaming.
+	found := false
+	for _, tg := range dl.addedTags["h"] {
+		if tg == "RENAME" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected RENAME tag, got %v", dl.addedTags)
+	}
+}
+
+func TestRenameTaskFilesSubtitleFolder(t *testing.T) {
+	dl := &capableDownloader{
+		fakeDownloader: &fakeDownloader{tasks: []model.Torrent{finishedTask("h", "/media/ani-1")}},
+		files:          []TaskFile{{Index: 0, Name: "v.mkv", Size: 1}, {Index: 1, Name: "v.srt", Size: 1}},
+	}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "rename": true, "subtitleIndependentFolderEnabled": true, "subtitleIndependentFolderName": "Subs"},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1"}}},
+		ListFiles:     dl.listFiles, RenameFileInTask: dl.rename, SetPriority: dl.setPrio,
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if dl.renamed["v.srt"] != "Subs/Some Anime - 01.srt" {
+		t.Fatalf("expected subtitle folder prefix, got %v", dl.renamed["v.srt"])
+	}
+}
+
+func TestRenameTaskFilesSkipsWhenRenameOff(t *testing.T) {
+	dl := &capableDownloader{
+		fakeDownloader: &fakeDownloader{tasks: []model.Torrent{finishedTask("h", "/media/ani-1")}},
+		files:          []TaskFile{{Index: 0, Name: "v.mkv", Size: 1}},
+	}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "rename": false},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1"}}},
+		ListFiles:     dl.listFiles, RenameFileInTask: dl.rename,
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(dl.renamed) != 0 {
+		t.Fatalf("rename disabled must not rename, got %v", dl.renamed)
+	}
+}
+
+func TestFileReName(t *testing.T) {
+	cases := map[string][2]string{
+		"video":     {"a.b.mkv", "Show S01E02.mkv"},
+		"subtitle":  {"a.b.chs.ass", "Show S01E02.chs.ass"},
+		"plain-sub": {"a.b.srt", "Show S01E02.srt"},
+		"other":     {"a.b.txt", "a.b.txt"},
+	}
+	_ = cases
+	if got := fileReName("a.b.mkv", "Show S01E02"); got != "Show S01E02.mkv" {
+		t.Errorf("video: %s", got)
+	}
+	if got := fileReName("a.b.chs.ass", "Show S01E02"); got != "Show S01E02.chs.ass" {
+		t.Errorf("subtitle lang: %s", got)
+	}
+	// Java keeps any intermediate segment as the language slot, so "a.b.srt"
+	// carries "b" just like a ".chs" tag would.
+	if got := fileReName("a.b.srt", "Show S01E02"); got != "Show S01E02.b.srt" {
+		t.Errorf("subtitle: %s", got)
+	}
+	if got := fileReName("a.b.txt", "Show S01E02"); got != "a.b.txt" {
+		t.Errorf("other untouched: %s", got)
+	}
+}
+
+func TestRenameTaskFilesDuplicateTargetDropsPriority(t *testing.T) {
+	dl := &capableDownloader{
+		fakeDownloader: &fakeDownloader{tasks: []model.Torrent{finishedTask("h", "/media/ani-1")}},
+		files: []TaskFile{
+			{Index: 0, Name: "a.mkv", Size: 200},
+			{Index: 1, Name: "b.mkv", Size: 100}, // same target name after rename
+		},
+	}
+	c := &Coordinator{
+		Config:        model.Config{"scrape": false, "rename": true},
+		Downloader:    dl,
+		Subscriptions: &fakeSubs{items: []model.Ani{{ID: "ani-1"}}},
+		ListFiles:     dl.listFiles, RenameFileInTask: dl.rename, SetPriority: dl.setPrio,
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Larger file takes the canonical name; the duplicate is de-prioritized.
+	if dl.renamed["a.mkv"] != "Some Anime - 01.mkv" {
+		t.Fatalf("primary video: %v", dl.renamed)
+	}
+	if len(dl.prioZero) != 1 || dl.prioZero[0] != 1 {
+		t.Fatalf("expected duplicate file index 1 dropped to priority 0, got %v", dl.prioZero)
 	}
 }

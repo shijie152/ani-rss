@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
@@ -22,6 +23,28 @@ import (
 // organized. It mirrors the Java TorrentsTagEnum.DOWNLOAD_COMPLETE value and
 // keeps the pass idempotent across intervals.
 const CompletionTag = "下载完成"
+
+// RenameTag marks a task whose in-downloader files were already renamed. It
+// mirrors Java's TorrentsTagEnum.RENAME so the pass does not rename twice.
+const RenameTag = "RENAME"
+
+// TaskFile is one file inside a torrent task, the subset needed for the
+// in-downloader rename.
+type TaskFile struct {
+	Index    int
+	Name     string
+	Size     int64
+	Priority int
+}
+
+// TaskFileLister lists a task's member files; nil disables the rename.
+type TaskFileLister func(context.Context, string) ([]TaskFile, error)
+
+// TaskFileRenamer renames one member inside the downloader.
+type TaskFileRenamer func(context.Context, string, string, string) error
+
+// TaskFilePriority sets a member's download priority (0 drops a duplicate).
+type TaskFilePriority func(context.Context, string, int, int) error
 
 // Downloader is the narrow slice of the adapter used by the completion pass.
 // Implementations are shared with the RSS submission adapter.
@@ -75,6 +98,11 @@ type Coordinator struct {
 	Subscriptions Subscriptions
 	Notify        Notifier
 	Logger        *slog.Logger
+	// ListFiles/RenameFileInTask/SetPriority wire the optional in-downloader
+	// rename. They are nil for adapters that cannot enumerate task files.
+	ListFiles        TaskFileLister
+	RenameFileInTask TaskFileRenamer
+	SetPriority      TaskFilePriority
 }
 
 // Run executes a single completion pass. It is safe to invoke on a fixed
@@ -127,6 +155,13 @@ func (c *Coordinator) process(ctx context.Context, task model.Torrent) error {
 	// later step fails. The tag is the durable idempotency record.
 	if err := c.Downloader.AddTags(ctx, task.Hash, CompletionTag); err != nil {
 		return err
+	}
+
+	// In-downloader rename (Java TorrentUtil.rename): give the seeding files
+	// the canonical names before the media library organizes them. Best-effort
+	// — adapters without file access simply skip it.
+	if err := c.renameTaskFiles(ctx, task, ani); err != nil {
+		c.Logger.Warn("in-downloader rename failed", "task", task.Name, "error", err)
 	}
 
 	organized, scrapeErr := c.organize(ctx, &ani)
@@ -253,6 +288,121 @@ func (c *Coordinator) subgroupFor(task model.Torrent, ani model.Ani) string {
 		return ani.Subgroup
 	}
 	return "未知字幕组"
+}
+
+// renameTaskFiles mirrors Java's TorrentUtil.rename/DOWNLOAD.rename: when the
+// rename toggle is on and the adapter can list task files, video and subtitle
+// members are renamed inside the downloader to the task's canonical name so
+// seeded media keeps the standard naming. OVA/other tasks skip it. The
+// RENAME tag is applied once files are renamed so later passes do not repeat.
+func (c *Coordinator) renameTaskFiles(ctx context.Context, task model.Torrent, ani model.Ani) error {
+	if !appconfig.Bool(c.Config, "rename") || hasTag(task.TagList, RenameTag) {
+		return nil
+	}
+	if c.ListFiles == nil || c.RenameFileInTask == nil {
+		return nil
+	}
+	files, err := c.ListFiles(ctx, task.Hash)
+	if err != nil {
+		return err
+	}
+	// Java's files(filter=true): only non-empty video/subtitle members take
+	// part, largest first so the primary video wins the canonical name.
+	mediaFiles := make([]TaskFile, 0, len(files))
+	for _, f := range files {
+		if f.Size < 1 || (!isVideoName(f.Name) && !isSubtitleName(f.Name)) {
+			continue
+		}
+		mediaFiles = append(mediaFiles, f)
+	}
+	sort.SliceStable(mediaFiles, func(i, j int) bool { return mediaFiles[i].Size > mediaFiles[j].Size })
+	files = mediaFiles
+	if len(files) == 0 {
+		return nil
+	}
+	reName := task.Name
+	if strings.TrimSpace(reName) == "" {
+		return nil
+	}
+	subFolder := ""
+	if appconfig.Bool(c.Config, "subtitleIndependentFolderEnabled") {
+		subFolder = strings.TrimSpace(appconfig.String(c.Config, "subtitleIndependentFolderName"))
+	}
+	existing := map[string]bool{}
+	for _, f := range files {
+		existing[f.Name] = true
+	}
+	used := map[string]bool{}
+	for _, f := range files {
+		newName := fileReName(f.Name, reName)
+		if newName == f.Name {
+			continue
+		}
+		if isSubtitleName(newName) && subFolder != "" {
+			newName = subFolder + "/" + newName
+		}
+		if existing[newName] || used[newName] {
+			// A duplicate target means the member is redundant; stop its
+			// download like Java's filePrio=0 rather than renaming onto it.
+			if c.SetPriority != nil {
+				_ = c.SetPriority(ctx, task.Hash, f.Index, 0)
+			}
+			continue
+		}
+		used[newName] = true
+		if err := c.RenameFileInTask(ctx, task.Hash, f.Name, newName); err != nil {
+			return err
+		}
+	}
+	return c.Downloader.AddTags(ctx, task.Hash, RenameTag)
+}
+
+// fileReName reproduces BaseDownload.getFileReName: video keeps its
+// extension, subtitle keeps an optional language segment plus its extension,
+// and any other file is left untouched.
+func fileReName(name, reName string) string {
+	ext := extension(name)
+	if ext == "" {
+		return name
+	}
+	var newPath string
+	switch {
+	case isVideoName(name):
+		newPath = reName + "." + ext
+	case isSubtitleName(name):
+		newPath = reName
+		if inner := extension(strings.TrimSuffix(name, "."+ext)); inner != "" {
+			newPath += "." + inner
+		}
+		newPath += "." + ext
+	default:
+		return name
+	}
+	return newPath
+}
+
+func extension(name string) string {
+	idx := strings.LastIndex(name, ".")
+	if idx < 0 || idx == len(name)-1 {
+		return ""
+	}
+	return name[idx+1:]
+}
+
+func isVideoName(name string) bool {
+	switch strings.ToLower(extension(name)) {
+	case "mkv", "mp4", "avi", "wmv", "ts", "m4v", "mov", "flv":
+		return true
+	}
+	return false
+}
+
+func isSubtitleName(name string) bool {
+	switch strings.ToLower(extension(name)) {
+	case "ass", "ssa", "sub", "srt", "lyc", "sup", "pgs", "mks", "vtt":
+		return true
+	}
+	return false
 }
 
 // finished delegates to model.Torrent.Finished so the terminal-state set is

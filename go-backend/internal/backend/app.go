@@ -1910,6 +1910,31 @@ func (a *App) runCompletionPass(ctx context.Context) error {
 			return a.notifications.Dispatch(nctx, notification.Event{Ani: ev.Ani, Status: ev.Status, Text: ev.Text, Path: ev.Path, Resource: ev.Resource})
 		},
 	}
+	// Wire the optional in-downloader rename (Java DOWNLOAD.rename). Only
+	// adapters that can enumerate task files provide the seams; others leave
+	// them nil and the pass skips the step.
+	if lister, ok := coordinator.QB.(interface {
+		Files(context.Context, string) ([]downloader.TorrentFile, error)
+	}); ok {
+		pass.ListFiles = func(ctx context.Context, hash string) ([]completion.TaskFile, error) {
+			files, err := lister.Files(ctx, hash)
+			out := make([]completion.TaskFile, 0, len(files))
+			for _, f := range files {
+				out = append(out, completion.TaskFile{Index: f.Index, Name: f.Name, Size: f.Size, Priority: f.Priority})
+			}
+			return out, err
+		}
+	}
+	if renamer, ok := coordinator.QB.(interface {
+		RenameFile(context.Context, string, string, string) error
+	}); ok {
+		pass.RenameFileInTask = renamer.RenameFile
+	}
+	if prio, ok := coordinator.QB.(interface {
+		SetFilePriority(context.Context, string, int, int) error
+	}); ok {
+		pass.SetPriority = prio.SetFilePriority
+	}
 	return pass.Run(ctx)
 }
 
