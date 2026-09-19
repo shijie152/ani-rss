@@ -26,6 +26,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/auth"
 	"github.com/shijie152/ani-rss/go-backend/internal/collection"
+	"github.com/shijie152/ani-rss/go-backend/internal/completion"
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
@@ -442,6 +443,15 @@ func (a *App) RunSchedulers(ctx context.Context) {
 			// Source catalogues are independent from RSS. Running inside the
 			// scheduler worker prevents overlapping prewarms.
 			a.prewarmSourceCatalogsContext(jobCtx)
+		}}},
+		{Domain: "media", Job: scheduler.Job{Interval: a.renameInterval(), Initial: true, Run: func(jobCtx context.Context) {
+			// The download-completion pass is the Java RenameTask equivalent:
+			// it organizes finished downloads into the media library and drives
+			// the completion/finish lifecycle. It runs on its own cadence so a
+			// slow RSS refresh cannot delay media processing.
+			if err := a.runCompletionPass(jobCtx); err != nil && !errors.Is(err, context.Canceled) {
+				a.logger.Warn("download completion pass failed", "error", err)
+			}
 		}}},
 	}
 	scheduler.NewOwned(a.ownership, jobs...).Run(schedulerContext)
@@ -1867,6 +1877,51 @@ func (a *App) processEmbyWebhook(ctx context.Context, payload map[string]any) er
 		return fmt.Errorf("Bangumi episode update HTTP %d", updated.StatusCode)
 	}
 	return nil
+}
+
+// renameInterval resolves the download-completion cadence from the existing
+// renameSleepSeconds setting, matching the Java RenameTask default of 10s.
+func (a *App) renameInterval() time.Duration {
+	seconds := appconfig.Int(a.config.Snapshot(), "renameSleepSeconds")
+	if seconds < 1 {
+		seconds = 10
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// runCompletionPass executes one download-completion cycle against the
+// currently configured downloader. It is reached only through the scheduler.
+func (a *App) runCompletionPass(ctx context.Context) error {
+	coordinator, err := a.newCoordinator()
+	if err != nil {
+		return err
+	}
+	scraper, err := a.mediaService()
+	if err != nil {
+		return err
+	}
+	pass := &completion.Coordinator{
+		Config:        a.config.Snapshot(),
+		Downloader:    coordinator.QB,
+		Scraper:       mediaScraper{service: scraper},
+		Subscriptions: a.subscriptions,
+		Logger:        a.logger,
+		Notify: func(nctx context.Context, ev completion.NotificationEvent) error {
+			return a.notifications.Dispatch(nctx, notification.Event{Ani: ev.Ani, Status: ev.Status, Text: ev.Text, Path: ev.Path, Resource: ev.Resource})
+		},
+	}
+	return pass.Run(ctx)
+}
+
+// mediaScraper adapts media.Service to the completion.Scraper seam, keeping
+// the completion module independent from the media package's Result shape.
+type mediaScraper struct {
+	service *media.Service
+}
+
+func (m mediaScraper) Scrape(ctx context.Context, ani *model.Ani, force bool) (completion.ScrapeResult, error) {
+	result, err := m.service.Scrape(ctx, ani, force)
+	return completion.ScrapeResult{Processed: result.Processed, Path: result.Path}, err
 }
 
 func (a *App) metadataClient() (*metadata.Client, error) {

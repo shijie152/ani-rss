@@ -3,7 +3,12 @@ package rss
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +29,7 @@ type Coordinator struct {
 	Notify        func(context.Context, model.Ani, *model.Resource, string, string) error
 	Retry         int
 	ConfigDir     string
+	Logger        *slog.Logger
 	mu            sync.Mutex
 	inFlight      map[string]struct{}
 }
@@ -37,6 +43,11 @@ func (c *Coordinator) Refresh(ctx context.Context, item model.Ani) ([]model.Reso
 	if intakeErr != nil {
 		failures = append(failures, intakeErr.Error())
 	}
+	// Side-channel checks that mirror Java's ItemsUtil.omit/procrastinating.
+	// They observe the matched resource set and only emit notifications; they
+	// never influence matching, submission, or progress.
+	c.checkOmit(ctx, item, all)
+	c.checkProcrastinating(ctx, item, all)
 	submitted, submitErr := c.submit(ctx, item, all)
 	progressResources := all
 	if submitErr != nil {
@@ -168,8 +179,20 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		Notify:       c.Notify,
 		ConfigDir:    c.ConfigDir,
 		HTTPClient:   c.HTTPClient,
-		Reserve:      c.reserve,
-		Release:      c.release,
+		LocalExists:  c.localFileExists,
+		SaveExist: func(ctx context.Context, a model.Ani, r model.Resource) {
+			// Mirror Java's saveTorrent-on-hit so the fileExist check becomes a
+			// cheap cache lookup on subsequent refreshes.
+			if err := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, a, r); err != nil {
+				// A cache miss must not fail the refresh; the existence check
+				// still protected this pass.
+				if c.Logger != nil {
+					c.Logger.Warn("fileExist cache mark failed", "error", err)
+				}
+			}
+		},
+		Reserve: c.reserve,
+		Release: c.release,
 	}
 	return s.Submit(ctx, ani, resources)
 }
@@ -211,4 +234,162 @@ func dedupeFeeds(items []model.Resource, ani model.Ani, coexist bool) []model.Re
 		result = append(result, item)
 	}
 	return result
+}
+
+// localFileExists implements the Java fileExist check: a resource is treated
+// as already downloaded when the subscription's download directory already
+// holds a video file for the same season+episode (or any video for OVA).
+func (c *Coordinator) localFileExists(ani model.Ani, resource model.Resource) bool {
+	if c.Subscriptions == nil {
+		return false
+	}
+	data, err := c.Subscriptions.DownloadPath(ani)
+	if err != nil {
+		return false
+	}
+	path, _ := data["downloadPath"].(string)
+	if path == "" {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isVideoName(entry.Name()) {
+			continue
+		}
+		if ani.OVA {
+			return true
+		}
+		season, episode, ok := seasonEpisodeFor(entry.Name())
+		if ok && season == ani.Season && episode == resource.Episode {
+			return true
+		}
+	}
+	return false
+}
+
+var seasonEpisodeRE = regexp.MustCompile(`[Ss](\d+)[Ee](\d+(\.5)?)`)
+
+// seasonEpisodeFor extracts S{season}E{episode} from a media filename using the
+// same SEASON_REG the Java fileExist check applies.
+func seasonEpisodeFor(name string) (int, float64, bool) {
+	match := seasonEpisodeRE.FindStringSubmatch(name)
+	if len(match) < 3 {
+		return 0, 0, false
+	}
+	season, serr := strconv.Atoi(match[1])
+	episode, eerr := strconv.ParseFloat(match[2], 64)
+	return season, episode, serr == nil && eerr == nil
+}
+
+func isVideoName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mkv", ".mp4", ".avi", ".wmv", ".ts", ".m4v", ".mov", ".flv":
+		return true
+	}
+	return false
+}
+
+// checkOmit emits a single OMIT notification when the matched resources leave
+// gaps in the episode run, mirroring ItemsUtil.omit: global omit + the
+// subscription's own omit flag, non-OVA, and at most 10 missing episodes.
+// The dispatcher's 24h dedupe supplies Java's per-day repeat suppression.
+func (c *Coordinator) checkOmit(ctx context.Context, ani model.Ani, resources []model.Resource) {
+	if c.Notify == nil || c.Config == nil {
+		return
+	}
+	cfg := c.Config.Snapshot()
+	if !appconfig.Bool(cfg, "omit") || !ani.Omit || ani.OVA {
+		return
+	}
+	missing := omittedEpisodes(resources)
+	if len(missing) == 0 || len(missing) > 10 {
+		return
+	}
+	parts := make([]string, 0, len(missing))
+	for _, ep := range missing {
+		parts = append(parts, "缺少集数 "+ani.Title+" S"+pad2(ani.Season)+"E"+pad2(ep))
+	}
+	if err := c.Notify(ctx, ani, nil, "OMIT", strings.Join(parts, "\n")); err != nil && c.Logger != nil {
+		c.Logger.Warn("omit notification failed", "subscription", ani.ID, "error", err)
+	}
+}
+
+// checkProcrastinating mirrors ItemsUtil.procrastinating: when the newest
+// (optionally master-only) resource is older than procrastinatingDay days, a
+// single PROCRASTINATING notice is emitted; dispatcher dedupe repeats daily.
+func (c *Coordinator) checkProcrastinating(ctx context.Context, ani model.Ani, resources []model.Resource) {
+	if c.Notify == nil || c.Config == nil {
+		return
+	}
+	cfg := c.Config.Snapshot()
+	if !appconfig.Bool(cfg, "procrastinating") || !ani.Procrastinating {
+		return
+	}
+	masterOnly := appconfig.Bool(cfg, "procrastinatingMasterOnly")
+	var latest *time.Time
+	for _, resource := range resources {
+		if masterOnly && !resource.Master {
+			continue
+		}
+		if resource.PublishedAt == nil {
+			continue
+		}
+		if latest == nil || resource.PublishedAt.After(*latest) {
+			stamp := *resource.PublishedAt
+			latest = &stamp
+		}
+	}
+	if latest == nil || latest.After(time.Now()) {
+		return
+	}
+	days := int(time.Since(*latest).Hours() / 24)
+	limit := appconfig.Int(cfg, "procrastinatingDay")
+	if limit < 1 {
+		limit = 14
+	}
+	if days < limit {
+		return
+	}
+	text := "检测到" + ani.Title + ", 已摸鱼" + strconv.Itoa(days) + "天"
+	if err := c.Notify(ctx, ani, nil, "PROCRASTINATING", text); err != nil && c.Logger != nil {
+		c.Logger.Warn("procrastinating notification failed", "subscription", ani.ID, "error", err)
+	}
+}
+
+// omittedEpisodes returns the integer episode numbers missing between the
+// lowest and highest matched episode, the same set PreviewResult.omitList
+// reports to the UI.
+func omittedEpisodes(resources []model.Resource) []int {
+	seen := map[int]bool{}
+	min, max := 0, 0
+	for _, resource := range resources {
+		if resource.Episode <= 0 || resource.Episode != float64(int(resource.Episode)) {
+			continue
+		}
+		ep := int(resource.Episode)
+		seen[ep] = true
+		if min == 0 || ep < min {
+			min = ep
+		}
+		if ep > max {
+			max = ep
+		}
+	}
+	missing := []int{}
+	for ep := min; ep <= max && ep > 0; ep++ {
+		if !seen[ep] {
+			missing = append(missing, ep)
+		}
+	}
+	return missing
+}
+
+func pad2(value int) string {
+	if value < 10 {
+		return "0" + strconv.Itoa(value)
+	}
+	return strconv.Itoa(value)
 }

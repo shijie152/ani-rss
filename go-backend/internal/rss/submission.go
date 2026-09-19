@@ -36,6 +36,12 @@ type Submitter struct {
 	Notify       func(context.Context, model.Ani, *model.Resource, string, string) error
 	ConfigDir    string
 	HTTPClient   *http.Client
+	// LocalExists reports whether a resource's target media file is already on
+	// disk. It backs the Java fileExist toggle; nil disables the check.
+	LocalExists func(model.Ani, model.Resource) bool
+	// SaveExist marks a resource already on disk so later passes short-circuit
+	// without rescanning the media directory (Java TorrentUtil.saveTorrent).
+	SaveExist func(context.Context, model.Ani, model.Resource)
 	// Reserve/Release provide a process-local in-flight seam. They protect
 	// duplicate submissions without holding a lock across network I/O.
 	Reserve func(string) bool
@@ -108,8 +114,29 @@ func (s *Submitter) Submit(ctx context.Context, ani model.Ani, resources []model
 	if deleteErr := s.deleteStandbyTasks(ctx, savePath, resources, tasks); deleteErr != nil {
 		failures = append(failures, deleteErr.Error())
 	}
+	// downloadCount caps concurrent unfinished downloads exactly like Java's
+	// downloadAni: count current unfinished tasks, then stop once the limit is
+	// reached. Main-integer resources consume a slot; .5/standby do not.
+	downloadCount := 0
+	unfinished := 0
+	if s.Config != nil {
+		downloadCount = appconfig.Int(s.Config.Snapshot(), "downloadCount")
+	}
+	if downloadCount > 0 {
+		for _, task := range tasks {
+			if !taskFinished(task) {
+				unfinished++
+			}
+		}
+	}
 	newResources := []model.Resource{}
 	for _, resource := range PlanSubmission(resources, history, tasks) {
+		if s.localExists(ani, resource) {
+			continue
+		}
+		if downloadCount > 0 && unfinished >= downloadCount {
+			continue
+		}
 		key := resourceKey(resource)
 		if s.Reserve != nil && !s.Reserve(key) {
 			continue
@@ -129,6 +156,9 @@ func (s *Submitter) Submit(ctx context.Context, ani model.Ani, resources []model
 				history = append(history, resource)
 				s.recordCache(ctx, ani, resource, &failures)
 				newResources = append(newResources, resource)
+				if downloadCount > 0 && resource.Master && resource.Episode == float64(int(resource.Episode)) {
+					unfinished++
+				}
 				if s.Notify != nil {
 					if notifyErr := s.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
 						failures = append(failures, "通知失败: "+notifyErr.Error())
@@ -142,6 +172,9 @@ func (s *Submitter) Submit(ctx context.Context, ani model.Ani, resources []model
 		history = append(history, resource)
 		s.recordCache(ctx, ani, resource, &failures)
 		newResources = append(newResources, resource)
+		if downloadCount > 0 && resource.Master && resource.Episode == float64(int(resource.Episode)) {
+			unfinished++
+		}
 		if s.Notify != nil {
 			if notifyErr := s.Notify(ctx, ani, &resource, "DOWNLOAD_START", "开始下载: "+resource.Title); notifyErr != nil {
 				failures = append(failures, "通知失败: "+notifyErr.Error())
@@ -223,4 +256,30 @@ func resourceKey(resource model.Resource) string {
 	}
 	sum := sha256.Sum256([]byte(resource.DownloadURL + "\x00" + resource.Title))
 	return hex.EncodeToString(sum[:])
+}
+
+// localExists applies the Java fileExist check: when the toggle is on and a
+// resolver is wired, a resource whose media file already sits in the download
+// directory is skipped and marked so later passes short-circuit cheaply.
+func (s *Submitter) localExists(ani model.Ani, resource model.Resource) bool {
+	if s.Config == nil || !appconfig.Bool(s.Config.Snapshot(), "fileExist") {
+		return false
+	}
+	if s.LocalExists == nil || !s.LocalExists(ani, resource) {
+		return false
+	}
+	if s.SaveExist != nil {
+		s.SaveExist(context.Background(), ani, resource)
+	}
+	return true
+}
+
+// taskFinished mirrors the terminal-state set used to count unfinished tasks
+// for the downloadCount limit.
+func taskFinished(task model.Torrent) bool {
+	switch task.State {
+	case "queuedUP", "uploading", "stalledUP", "stoppedUP", "pausedUP", "forcedUP":
+		return true
+	}
+	return task.Progress >= 100
 }
