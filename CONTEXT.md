@@ -37,7 +37,7 @@ _避免_：种子、文件。种子是资源的下载载体，文件是下载后
 
 ## 外部服务与事件
 
-**资源源站**：提供 RSS、番剧列表或资源详情的外部站点，例如 Mikan、AniBT 和 AnimeGarden。
+**资源源站**：提供 RSS、番剧列表或资源详情的外部站点，例如 Mikan、AniBT 和 AnimeGarden。Mikan 官方域名 `mikanani.me` 经代理偶发 522/超时；可用镜像 `mikanime.tv`（302 重定向回官方，但部分网络环境下更稳），可在订阅 RSS 地址或 `mikanHost` 中切换。
 
 **元数据服务**：提供番剧和媒体资料的外部服务，例如 TMDB 和 Bangumi。
 
