@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: done
 
 # ANI-RSS Go 后端渐进替换
 

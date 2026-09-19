@@ -57,4 +57,4 @@ ani-rss-update.exe
 ### Agent / test temp artifacts ###
 .playwright-cli/
 output/
-**/.scratch/
+go-backend/.scratch/

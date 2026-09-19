@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: done
 
 # 下载完成后处理管线补全
 
