@@ -53,3 +53,8 @@ ani-rss-update.exe
 
 ### Agent scratch temp ###
 .scratch/.tmp/
+
+### Agent / test temp artifacts ###
+.playwright-cli/
+output/
+**/.scratch/
