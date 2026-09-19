@@ -226,7 +226,7 @@ func TestAwaitStalledUPRequiresStoppedUP(t *testing.T) {
 func TestFinishedStateSet(t *testing.T) {
 	for state, want := range map[string]bool{
 		"queuedUP": true, "uploading": true, "stalledUP": true, "stoppedUP": true,
-		"downloading": false, "stalledDL": false, "pausedUP": false, "forcedUP": false, "error": false,
+		"downloading": false, "stalledDL": false, "pausedUP": false, "forcedUP": true, "error": false,
 	} {
 		if got := (model.Torrent{State: state, Progress: 100}).Finished(); got != want {
 			t.Errorf("state %s: got %v want %v", state, got, want)
