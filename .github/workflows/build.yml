@@ -7,6 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.31.0
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -20,7 +24,6 @@ jobs:
           cache-dependency-path: ani-rss-ui/pnpm-lock.yaml
       - name: Build Go release bundles
         run: |
-          corepack enable
           version=$(sed -n '1p' VERSION)
           echo "version=v$version" >> "$GITHUB_ENV"
           ANI_RSS_VERSION="$version" bash ./package.sh
