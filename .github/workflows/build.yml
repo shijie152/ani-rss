@@ -46,12 +46,6 @@ jobs:
         uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Login to Docker Hub
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Login to ghcr.io
         uses: docker/login-action@v4
         with:
@@ -68,18 +62,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/ani-rss:latest
             ghcr.io/${{ github.repository_owner }}/ani-rss:${{ env.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build and push Docker image to Docker Hub (Go-only)
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
-        uses: docker/build-push-action@v7
-        with:
-          context: ./
-          file: ./docker/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          push: true
-          tags: |
-            wushuo894/ani-rss:latest
-            wushuo894/ani-rss:${{ env.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
