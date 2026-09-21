@@ -44,7 +44,7 @@ test('invalidates the pre-versioned catalogue cache', () => {
 test('invalidates v2 catalogue cache after the season identity fix', () => {
   const storage = new MemoryStorage()
   const data = {seasons: [{seasonLabel: '2026 春'}], weeks: [{weekLabel: '星期一', items: [{title: 'Stale', url: '/stale'}]}]}
-  storage.setItem('ani-rss:season-catalog:v2:mikan:2026%20%E6%98%A5', JSON.stringify({
+  storage.setItem('ani-rss:season-catalog:v3:mikan:2026%20%E6%98%A5', JSON.stringify({
     version: 'v2',
     savedAt: 1000,
     data
