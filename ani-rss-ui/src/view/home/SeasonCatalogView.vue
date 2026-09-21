@@ -90,7 +90,7 @@
                      filterable
                      :loading="seasonLoading"
                      placeholder="选择季度"
-                     @change="loadSource()">
+                     @change="selectSeason">
             <el-option v-for="option in seasonOptions"
                        :key="option.value"
                        :label="option.label"
@@ -164,6 +164,7 @@ import AddView from "@/view/home/AddView.vue";
 import {
   preserveSeasonOptions,
   readSeasonCache,
+  resolveSeasonRequest,
   withSeasonOptions,
   writeSeasonCacheWithCurrentAlias
 } from "./seasonCatalogCache.js";
@@ -175,8 +176,10 @@ const activeWeek = ref('')
 const weeks = ref([])
 const mikanSeasons = ref([])
 const mikanSeason = ref('')
+const mikanFollowsCurrent = ref(true)
 const aniBTSeasons = ref([])
 const aniBTSeason = ref('')
+const aniBTFollowsCurrent = ref(true)
 const mikanCurrentSeason = ref('')
 const aniBTCurrentSeason = ref('')
 const resourceVisible = ref(false)
@@ -249,7 +252,7 @@ const rememberMikanCurrentSeason = data => {
 }
 
 const loadMikan = async (force = false, sequence = loadSequence) => {
-  const requestedSeason = mikanSeason.value || 'current'
+  const requestedSeason = resolveSeasonRequest(mikanSeason.value, mikanFollowsCurrent.value)
   const cached = readCache('mikan', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
     if (sequence !== loadSequence) return
@@ -267,7 +270,9 @@ const loadMikan = async (force = false, sequence = loadSequence) => {
   loading.value = true
   loadError.value = ''
   try {
-    const selected = mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
+    const selected = mikanFollowsCurrent.value
+        ? undefined
+        : mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
     const res = await http.mikan('', selected || {})
     if (sequence !== loadSequence) return
     const data = res.data || {}
@@ -304,7 +309,7 @@ const applyAniBTData = data => {
 }
 
 const loadAniBT = async (force = false, sequence = loadSequence) => {
-  const requestedSeason = aniBTSeason.value || 'current'
+  const requestedSeason = resolveSeasonRequest(aniBTSeason.value, aniBTFollowsCurrent.value)
   const cached = readCache('ani-bt', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
     if (sequence !== loadSequence) return
@@ -321,7 +326,7 @@ const loadAniBT = async (force = false, sequence = loadSequence) => {
   loading.value = true
   loadError.value = ''
   try {
-    const res = await http.aniBT(aniBTSeason.value, '', '')
+    const res = await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')
     if (sequence !== loadSequence) return
     const data = res.data || {}
     if (requestedSeason === 'current' && data.requestedSeason) {
@@ -352,6 +357,16 @@ const loadSource = (force = false) => {
   cacheUpdatedAt.value = 0
   loadError.value = ''
   return source.value === 'mikan' ? loadMikan(force, sequence) : loadAniBT(force, sequence)
+}
+const selectSeason = () => {
+  if (source.value === 'mikan') {
+    const selected = mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
+    mikanFollowsCurrent.value = selected?.select === true
+        || Boolean(mikanCurrentSeason.value && mikanSeason.value === mikanCurrentSeason.value)
+  } else {
+    aniBTFollowsCurrent.value = Boolean(aniBTCurrentSeason.value && aniBTSeason.value === aniBTCurrentSeason.value)
+  }
+  loadSource()
 }
 const changeSource = () => {
   weeks.value = []

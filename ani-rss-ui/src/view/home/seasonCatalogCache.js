@@ -6,6 +6,9 @@ const MIKAN_SEARCH_CACHE_PREFIX = 'ani-rss:mikan-search:'
 
 const storageOrDefault = storage => storage || globalThis.localStorage
 
+export const resolveSeasonRequest = (season, followsCurrent) =>
+  followsCurrent ? 'current' : (season || 'current')
+
 export const seasonCacheKey = (source, season) =>
   `${CACHE_PREFIX}${CACHE_VERSION}:${source}:${encodeURIComponent(season || 'current')}`
 

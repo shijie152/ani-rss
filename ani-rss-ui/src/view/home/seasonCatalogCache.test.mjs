@@ -5,11 +5,17 @@ import {
   preserveSeasonOptions,
   readMikanSearchCache,
   readSeasonCache,
+  resolveSeasonRequest,
   withSeasonOptions,
   writeMikanSearchCache,
   writeSeasonCache,
   writeSeasonCacheWithCurrentAlias
 } from './seasonCatalogCache.js'
+
+test('keeps requesting the source current season after it resolves a concrete label', () => {
+  assert.equal(resolveSeasonRequest('2026 夏', true), 'current')
+  assert.equal(resolveSeasonRequest('2025 冬', false), '2025 冬')
+})
 
 class MemoryStorage {
   #values = new Map()
