@@ -251,6 +251,7 @@ func buildGroupRegex(titles []string) map[string]any {
 	regexList := make([][]map[string]any, 0)
 	tags := make([]string, 0, 5)
 	seen := map[string]bool{}
+	seenOptions := map[string]bool{}
 	for _, title := range titles {
 		items := make([]map[string]any, 0)
 		for _, pattern := range patterns {
@@ -266,7 +267,15 @@ func buildGroupRegex(titles []string) map[string]any {
 			}
 		}
 		if len(items) > 0 {
-			regexList = append(regexList, items)
+			optionKey := make([]string, 0, len(items))
+			for _, item := range items {
+				optionKey = append(optionKey, stringValue(item["regex"]))
+			}
+			key := strings.Join(optionKey, "\x00")
+			if !seenOptions[key] {
+				regexList = append(regexList, items)
+				seenOptions[key] = true
+			}
 		}
 	}
 	return map[string]any{"regexList": regexList, "tags": tags}

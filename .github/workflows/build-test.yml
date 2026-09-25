@@ -18,6 +18,10 @@ jobs:
           go test -race ./go-backend/...
           go vet ./go-backend/...
           git diff --check
+      - name: Fuzz core business boundaries
+        run: FUZZ_TIME=5s bash scripts/test-core-fuzz.sh
+      - name: Mutation test core business packages
+        run: bash scripts/test-core-mutations.sh
       - name: Set up Node
         uses: actions/setup-node@v6
         with:

@@ -107,6 +107,30 @@ test('updates the current-season cache alias after refreshing the current season
   })
 })
 
+test('does not replace an existing season snapshot with an empty refresh', () => {
+  const storage = new MemoryStorage()
+  const oldData = {seasons: [{seasonLabel: '2026 秋'}], weeks: [{weekLabel: '星期一', items: [{title: 'Old', url: '/old'}]}]}
+
+  writeSeasonCache('mikan', 'current', oldData, storage, 1000)
+  assert.equal(writeSeasonCache('mikan', 'current', {seasons: [], weeks: []}, storage, 2000), 0)
+  assert.deepEqual(readSeasonCache('mikan', 'current', storage), {
+    version: 'v3',
+    savedAt: 1000,
+    data: oldData
+  })
+})
+
+test('does not let an old concrete season update the current alias', () => {
+  const storage = new MemoryStorage()
+  const current = {seasons: [{seasonLabel: '2026 秋'}], weeks: [{weekLabel: '星期一', items: [{title: 'Current', url: '/current'}]}]}
+  const old = {seasons: [{seasonLabel: '2025 冬'}], weeks: [{weekLabel: '星期一', items: [{title: 'Old', url: '/old'}]}]}
+
+  writeSeasonCacheWithCurrentAlias('mikan', 'current', current, storage, 1000)
+  writeSeasonCacheWithCurrentAlias('mikan', '2025 冬', old, storage, 2000, false)
+  assert.equal(readSeasonCache('mikan', 'current', storage).data.weeks[0].items[0].title, 'Current')
+  assert.equal(readSeasonCache('mikan', '2025 冬', storage).data.weeks[0].items[0].title, 'Old')
+})
+
 test('does not let an old-season refresh overwrite the current-season cache alias', () => {
   const storage = new MemoryStorage()
   const current = {seasons: [{seasonLabel: '2026 秋'}], weeks: [{weekLabel: '星期一', items: [{title: 'Current', url: '/current'}]}]}
@@ -171,4 +195,17 @@ test('does not reuse a malformed Mikan search cache', () => {
   }))
 
   assert.equal(readMikanSearchCache('demo', storage), null)
+})
+
+test('does not replace a previous Mikan search snapshot with an invalid refresh', () => {
+  const storage = new MemoryStorage()
+  const oldData = {seasons: [], weeks: [{weekLabel: 'Search', items: []}], totalItems: 0}
+
+  writeMikanSearchCache('demo', oldData, storage, 1000)
+  assert.equal(writeMikanSearchCache('demo', {weeks: []}, storage, 2000), 0)
+  assert.deepEqual(readMikanSearchCache('demo', storage), {
+    version: 'v3',
+    savedAt: 1000,
+    data: oldData
+  })
 })
