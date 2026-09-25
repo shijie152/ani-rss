@@ -7,7 +7,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/view/home/seasonCatalogCache.test.mjs"
+    "test": "node --test src/*.test.mjs src/js/*.test.mjs src/view/home/*.test.mjs",
+    "test:mutation": "node ../scripts/test-ui-mutations.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

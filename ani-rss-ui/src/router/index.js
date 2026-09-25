@@ -1,11 +1,14 @@
 import {createRouter, createWebHashHistory} from 'vue-router'
-import DashboardView from '@/view/home/DashboardView.vue'
-import SeasonCatalogView from '@/view/home/SeasonCatalogView.vue'
-import SubscriptionView from '@/view/home/SubscriptionView.vue'
-import TorrentsInfosView from '@/view/home/TorrentsInfosView.vue'
-import LogsView from '@/view/home/LogsView.vue'
-import ConfigView from '@/view/home/ConfigView.vue'
 import {startupPage} from '@/js/global.js'
+
+const lazyView = {
+    dashboard: () => import('@/view/home/DashboardView.vue'),
+    seasons: () => import('@/view/home/SeasonCatalogView.vue'),
+    subscriptions: () => import('@/view/home/SubscriptionView.vue'),
+    downloads: () => import('@/view/home/TorrentsInfosView.vue'),
+    logs: () => import('@/view/home/LogsView.vue'),
+    settings: () => import('@/view/home/ConfigView.vue')
+}
 
 const startupPaths = ['/home', '/subscriptions']
 
@@ -16,27 +19,27 @@ const routes = [
     },
     {
         path: '/home',
-        component: DashboardView
+        component: lazyView.dashboard
     },
     {
         path: '/seasons',
-        component: SeasonCatalogView
+        component: lazyView.seasons
     },
     {
         path: '/subscriptions',
-        component: SubscriptionView
+        component: lazyView.subscriptions
     },
     {
         path: '/downloads',
-        component: TorrentsInfosView
+        component: lazyView.downloads
     },
     {
         path: '/logs',
-        component: LogsView
+        component: lazyView.logs
     },
     {
         path: '/settings',
-        component: ConfigView
+        component: lazyView.settings
     }
 ]
 

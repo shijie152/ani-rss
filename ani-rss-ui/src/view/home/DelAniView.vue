@@ -24,6 +24,7 @@ import * as http from "@/js/http.js";
 import {deleteAni} from "@/js/http.js";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {Delete} from "@element-plus/icons-vue";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const dialogVisible = ref(false)
 
@@ -40,9 +41,8 @@ const delAni = async () => {
         ElMessage.success(res.message)
         if (instance.vnode.props.onCallback) {
           emit('callback')
-        } else {
-          window.$reLoadList()
         }
+        notifySubscriptionsChanged()
         dialogVisible.value = false
       })
       .finally(() => {
@@ -112,4 +112,3 @@ const emit = defineEmits(['callback'])
   margin-top: 8px;
 }
 </style>
-

@@ -82,6 +82,7 @@
                  v-else
                  :key="`${entry.timestamp}-${index}`"
                  class="log-entry"
+                 style="content-visibility: auto; contain-intrinsic-size: 28px"
                  :class="`level-${entry.level.toLowerCase()}`">
               <el-tooltip :content="entry.timestamp" placement="top">
                 <time class="log-time">{{ entry.time }}</time>

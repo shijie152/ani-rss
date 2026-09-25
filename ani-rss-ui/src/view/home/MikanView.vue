@@ -68,7 +68,7 @@
                     <el-collapse-item v-for="it in week.items" :name="it.url">
                       <template #title>
                         <div class="flex collapse-title">
-                          <img :src="proxyImage(it['cover'])" class="cover" @click.stop="open(it.url)">
+                          <LazyImage :src="proxyImage(it['cover'])" :alt="it.title" class-name="cover" @click.stop="open(it.url)"/>
                           <div class="flex collapse-title">
                             <el-text :truncated="false" line-clamp="1" size="small"
                                      class="title-text">
@@ -148,9 +148,10 @@
 </template>
 
 <script setup>
-import {onBeforeUnmount, onMounted, ref} from "vue";
+import {onMounted, onBeforeUnmount, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy, Download as DownloadIcon} from "@element-plus/icons-vue";
+import LazyImage from '@/view/custom/LazyImage.vue';
 import {proxyImage} from "@/js/global.js";
 import * as http from "@/js/http.js";
 import {
@@ -159,6 +160,7 @@ import {
   writeMikanSearchCache,
   writeSeasonCache
 } from "./seasonCatalogCache.js";
+import {registerMikanCacheScheduler} from './mikanCacheScheduler.js';
 
 // 批量添加订阅
 let rssList = ref([]);
@@ -167,7 +169,6 @@ let groupLoading = ref(false)
 let activeName = ref("")
 let dialogVisible = ref(false)
 let loading = ref(false)
-let mikanRefreshTimer
 let requestSequence = 0
 let lastRequest = null
 let data = ref({
@@ -328,19 +329,6 @@ let change = (v) => {
   }
 }
 
-const scheduleMikanRefresh = () => {
-  clearTimeout(mikanRefreshTimer)
-  const now = new Date()
-  const next = new Date(now)
-  next.setHours(3, 0, 0, 0)
-  if (next <= now) next.setDate(next.getDate() + 1)
-  mikanRefreshTimer = window.setTimeout(async () => {
-    const request = lastRequest || {text: '', body: {}}
-    await list(request.text, request.body, {force: true, background: true})
-    scheduleMikanRefresh()
-  }, next.getTime() - now.getTime())
-}
-
 let selectName = ref('')
 let groups = ref({})
 
@@ -396,8 +384,17 @@ let open = url => {
 
 defineExpose({show})
 
-onMounted(scheduleMikanRefresh)
-onBeforeUnmount(() => clearTimeout(mikanRefreshTimer))
+let unregisterMikanScheduler
+onMounted(() => {
+  unregisterMikanScheduler = registerMikanCacheScheduler(
+      Symbol('mikan-view'),
+      () => {
+        const request = lastRequest || {text: '', body: {}}
+        return list(request.text, request.body, {force: true, background: true})
+      }
+  )
+})
+onBeforeUnmount(() => unregisterMikanScheduler?.())
 
 let emit = defineEmits(['callback'])
 

@@ -37,6 +37,7 @@ import {ElMessage, ElMessageBox} from "element-plus";
 import AniView from "./AniView.vue";
 import {aniData} from "@/js/ani.js";
 import * as http from '@/js/http.js'
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 
 const dialogVisible = ref(false)
@@ -64,7 +65,7 @@ const editAni = () => {
   let action = () => http.setAni(move.value, ani.value)
       .then(res => {
         ElMessage.success(res.message)
-        window.$reLoadList()
+        notifySubscriptionsChanged()
         dialogVisible.value = false
       })
       .finally(callback.value)

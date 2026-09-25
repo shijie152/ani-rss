@@ -93,11 +93,12 @@
 </template>
 
 <script setup>
-import {computed, onActivated, onDeactivated, onUnmounted, ref} from "vue";
+import {computed, onActivated, onDeactivated, ref} from "vue";
 import * as http from "@/js/http.js";
 import {ArrowDown, Check, Sort, SortDown, SortUp} from "@element-plus/icons-vue";
 import {formatSize} from "@/js/format.js";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
+import {usePolling} from "@/js/usePolling.js";
 
 const activeTab = ref('downloading')
 // 记录排序方式
@@ -121,9 +122,6 @@ let sortTypeList = [
     }
   }
 ]
-
-let polling = false
-let stopped = false
 
 let torrentsInfos = ref([])
 
@@ -175,39 +173,13 @@ let sortInfos = (infos) => {
   return infos;
 }
 
-let startPolling = async () => {
-  if (polling) {
-    return
-  }
-  polling = true
-  while (!stopped) {
-    try {
-      let res = await http.torrentsInfos()
-      let infos = await res.data
-      torrentsInfos.value = sortInfos(infos)
-    } catch (_) {
-    }
-    await sleep(3000)
-  }
-  polling = false
-}
+const polling = usePolling(async () => {
+  const res = await http.torrentsInfos()
+  torrentsInfos.value = sortInfos(res.data || [])
+}, 3000)
 
-let sleep = ms => {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-const resumePolling = () => {
-  stopped = false
-  startPolling()
-}
-
-const pausePolling = () => {
-  stopped = true
-}
-
-onActivated(resumePolling)
-onDeactivated(pausePolling)
-onUnmounted(pausePolling)
+onActivated(polling.start)
+onDeactivated(polling.stop)
 </script>
 
 <style scoped>

@@ -6,7 +6,7 @@
              width="760px">
     <template #header>
       <div class="resource-heading">
-        <img v-if="resourceCover" :src="proxyImage(resourceCover)" :alt="resourceTitle" class="resource-cover"/>
+        <LazyImage v-if="resourceCover" :src="proxyImage(resourceCover)" :alt="resourceTitle" class-name="resource-cover"/>
         <div class="resource-heading-info">
           <div class="resource-title">{{ resourceTitle }}</div>
           <el-text size="small" type="info">{{ resourceGroups.length }} 个字幕组 · 点击右侧箭头查看可下载资源</el-text>
@@ -120,11 +120,13 @@
                          class="anime-card"
                          shadow="never">
                   <div class="anime-card-content">
-                    <img v-if="itemCover(item)"
-                         :src="proxyImage(itemCover(item))"
-                         :alt="itemTitle(item)"
-                         class="anime-cover"
-                         @click="openExternal(item)">
+                    <LazyImage v-if="itemCover(item)"
+                               :src="proxyImage(itemCover(item))"
+                               :alt="itemTitle(item)"
+                               class-name="anime-cover"
+                               @click="openExternal(item)">
+                      <template #default><el-icon><Picture/></el-icon></template>
+                    </LazyImage>
                     <div v-else class="anime-cover anime-cover-empty" @click="openExternal(item)">
                       <el-icon><Picture/></el-icon>
                     </div>
@@ -161,6 +163,7 @@ import * as http from "@/js/http.js";
 import {proxyImage} from "@/js/global.js";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import AddView from "@/view/home/AddView.vue";
+import LazyImage from '@/view/custom/LazyImage.vue';
 import {
   preserveSeasonOptions,
   readSeasonCache,
@@ -168,6 +171,7 @@ import {
   withSeasonOptions,
   writeSeasonCacheWithCurrentAlias
 } from "./seasonCatalogCache.js";
+import {onSubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const source = ref('mikan')
 const loading = ref(false)
@@ -482,16 +486,15 @@ const scheduleNightlyRefresh = () => {
   }, next.getTime() - now.getTime())
 }
 
-const handleSubscriptionsChanged = () => loadSource(true)
-
+let unsubscribeSubscriptionsChanged
 onMounted(() => {
-  window.addEventListener('ani-rss:subscriptions-changed', handleSubscriptionsChanged)
+  unsubscribeSubscriptionsChanged = onSubscriptionsChanged(() => loadSource(true))
   loadSource()
   scheduleNightlyRefresh()
 })
 onBeforeUnmount(() => {
   clearTimeout(nightlyRefreshTimer)
-  window.removeEventListener('ani-rss:subscriptions-changed', handleSubscriptionsChanged)
+  unsubscribeSubscriptionsChanged?.()
 })
 </script>
 
@@ -503,6 +506,7 @@ onBeforeUnmount(() => {
 .season-content { flex: 1; min-height: 0; overflow: hidden; }
 .week-tabs, .week-scrollbar { height: 100%; }
 .anime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; padding: 2px 2px 10px; }
+.anime-card { content-visibility: auto; contain-intrinsic-size: 140px; }
 .anime-card { min-width: 0; }
 .anime-card-content { display: flex; gap: 12px; min-width: 0; }
 .anime-cover { width: 82px; height: 116px; flex-shrink: 0; border-radius: 5px; object-fit: cover; cursor: pointer; background: var(--el-fill-color-light); }

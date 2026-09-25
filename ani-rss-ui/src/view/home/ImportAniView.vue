@@ -93,6 +93,7 @@
 <script setup>
 import {getCurrentInstance, ref} from "vue";
 import {Document, Setting} from "@element-plus/icons-vue";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {ElMessage} from "element-plus";
 import {importAni} from "@/js/http.js";
 import UploadView from "@/view/custom/UploadView.vue";
@@ -107,7 +108,7 @@ let startImport = () => {
         if (instance.vnode.props.onCallback) {
           emit('callback')
         }
-        window.$reLoadList()
+        notifySubscriptionsChanged()
         dialogVisible.value = false
       })
       .finally(() => {

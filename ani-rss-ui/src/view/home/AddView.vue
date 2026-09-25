@@ -135,6 +135,7 @@ import AnimeGardenView from "@/view/home/AnimeGardenView.vue";
 import mikanIcon from "@/icon/icon-Mikan.png";
 import aniBTIcon from "@/icon/icon-AniBT.png";
 import animeGardenIcon from "@/icon/icon-AnimeGarden.png";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const showRss = ref(true)
 const aniBTRef = ref()
@@ -198,8 +199,7 @@ const addAni = (fun) => {
   http.addAni(ani.value)
       .then(res => {
         ElMessage.success(res.message)
-        window.$reLoadList?.()
-        window.dispatchEvent(new CustomEvent('ani-rss:subscriptions-changed'))
+        notifySubscriptionsChanged()
         dialogVisible.value = false
       }).finally(fun)
 }

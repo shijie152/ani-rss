@@ -94,6 +94,7 @@
 import {computed, ref} from "vue";
 import {ElMessage} from "element-plus";
 import {Link, Picture, UploadFilled} from "@element-plus/icons-vue";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {toApiFile} from "@/js/global.js";
 import * as http from "@/js/http.js";
 import UploadView from "@/view/custom/UploadView.vue";
@@ -146,7 +147,7 @@ const save = () => {
         if (sourceAni) {
           Object.assign(sourceAni, ani.value)
         }
-        window.$reLoadList?.()
+        notifySubscriptionsChanged()
         dialogVisible.value = false
       })
       .finally(() => {

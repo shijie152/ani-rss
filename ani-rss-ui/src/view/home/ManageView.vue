@@ -182,6 +182,7 @@ import DelAniView from "./DelAniView.vue";
 import ImportAniView from "@/view/home/ImportAniView.vue";
 import {CircleCheck, CircleClose, Download, Refresh, RefreshRight, Remove, Upload} from "@element-plus/icons-vue";
 import * as http from "@/js/http.js";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const selectFilters = [
   {
@@ -260,7 +261,7 @@ const getList = async () => {
 
 const reloadAllLists = async () => {
   await getList()
-  window.$reLoadList?.()
+  notifySubscriptionsChanged()
 }
 
 const show = () => {
@@ -295,7 +296,7 @@ const runSelectedAction = async (request, {reload = false} = {}) => {
     ElMessage.success(res.message)
     if (reload) {
       await fetchList()
-      window.$reLoadList?.()
+      notifySubscriptionsChanged()
     }
   } finally {
     loading.value = false

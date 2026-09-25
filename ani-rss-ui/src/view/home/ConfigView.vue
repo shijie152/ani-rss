@@ -55,6 +55,7 @@ import LoginConfigView from "@/view/config/LoginConfigView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import {configData} from "@/js/config.js";
 import * as http from "@/js/http.js";
+import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const configButtonLoading = ref(false)
 const loading = ref(true)
@@ -99,7 +100,7 @@ const saveConfig = () => {
   http.setConfig(my_config)
       .then(res => {
         ElMessage.success(res.message)
-        window.$reLoadList?.()
+        notifySubscriptionsChanged()
       })
       .finally(() => {
         configButtonLoading.value = false

@@ -69,8 +69,8 @@
                     <el-collapse-item v-for="anime in item.animes" :name="anime['bgmId']">
                       <template #title>
                         <div class="flex collapse-title">
-                          <img :src="proxyImage(anime['cover'])" class="cover" v-if="anime.cover"
-                               @click.stop="open(`https://anibt.net/anime/${anime['bgmId']}`)">
+                          <LazyImage :src="proxyImage(anime['cover'])" :alt="anime.title.primary" class-name="cover" v-if="anime.cover"
+                                     @click.stop="open(`https://anibt.net/anime/${anime['bgmId']}`)"/>
                           <div class="flex collapse-title">
                             <el-text :truncated="false" line-clamp="1" size="small"
                                      class="title-text">
@@ -154,6 +154,7 @@
 import {ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy} from "@element-plus/icons-vue";
+import LazyImage from '@/view/custom/LazyImage.vue';
 import * as http from "@/js/http.js";
 import {formatDate, fromNow} from "@/js/format.js";
 import {proxyImage} from "@/js/global.js";

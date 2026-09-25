@@ -13,7 +13,7 @@
               {{ weekItem.weekLabel }}
             </h2>
             <div :class="gridClass">
-              <div v-for="item in weekItem.items" :key="item.id">
+              <div v-for="item in weekItem.items" :key="item.id" class="subscription-list-item">
                 <component
                     :is="viewComponent"
                     :item="item"
@@ -29,7 +29,7 @@
         </template>
         <template v-else>
           <div :class="gridClass">
-            <div v-for="item in flatFilterList" :key="item.id">
+            <div v-for="item in flatFilterList" :key="item.id" class="subscription-list-item">
               <component
                   :is="viewComponent"
                   :item="item"
@@ -49,7 +49,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, ref} from "vue";
+import {computed, onMounted, onBeforeUnmount, ref} from "vue";
 import EditAniView from "./EditAniView.vue";
 import PlayListView from "@/view/play/PlayListView.vue";
 import CoverView from "./CoverView.vue";
@@ -60,6 +60,7 @@ import {listAni} from "@/js/http.js";
 import AniCardView from "@/view/home/AniCardView.vue";
 import AniCoverView from "@/view/home/AniCoverView.vue";
 import {showWeek} from "@/js/global.js";
+import {onSubscriptionsChanged} from '@/js/subscriptionChanges.js';
 
 const props = defineProps({
   title: String,
@@ -145,10 +146,12 @@ const getList = () => {
       })
 }
 
+let unsubscribe
 onMounted(() => {
-  window.$reLoadList = getList
+  unsubscribe = onSubscriptionsChanged(getList)
   getList()
 })
+onBeforeUnmount(() => unsubscribe?.())
 
 defineExpose({
   releaseDateList,
@@ -164,6 +167,8 @@ defineExpose({
   grid-gap: 8px;
   width: 100%;
 }
+
+.subscription-list-item { content-visibility: auto; contain-intrinsic-size: 160px; }
 
 .list-container {
   height: 100%;

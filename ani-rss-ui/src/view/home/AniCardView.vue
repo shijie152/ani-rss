@@ -2,10 +2,10 @@
   <el-card shadow="never">
     <div class="list-card-content">
       <div class="list-card-image-container">
-        <img :src="toApiFile(item['cover'])"
-             :alt="item.title"
-             class="list-card-image"
-             @click="handleCoverClick"/>
+        <LazyImage :src="toApiFile(item['cover'])"
+                   :alt="item.title"
+                   class-name="list-card-image"
+                   @click="handleCoverClick"/>
       </div>
       <div class="list-card-info">
         <div class="list-card-info-inner">
@@ -99,6 +99,7 @@
 <script setup>
 import {coverClickAction, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
 import {Delete, Edit as EditIcon, Files, Picture} from "@element-plus/icons-vue";
+import LazyImage from '@/view/custom/LazyImage.vue';
 
 let openBgmUrl = (it) => {
   if (it.bgmUrl?.length) {

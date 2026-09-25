@@ -3,10 +3,12 @@
     <div class="cover-image-container"
          :class="{'is-disabled': !item.enable}"
          @click="handleCoverClick">
-      <img v-if="item.cover"
-           :src="toApiFile(item.cover)"
-           :alt="item.title"
-           class="cover-image">
+      <LazyImage v-if="item.cover"
+                 :src="toApiFile(item.cover)"
+                 :alt="item.title"
+                 class-name="cover-image">
+        <template #default><el-icon><Picture/></el-icon></template>
+      </LazyImage>
       <div v-else class="cover-image cover-empty">
         <el-icon>
           <Picture/>
@@ -91,6 +93,7 @@ import {computed, ref} from "vue";
 import {Delete, Edit as EditIcon, Files, Fold, Picture, Star} from "@element-plus/icons-vue";
 import {coverClickAction, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
 import {fromNow} from "@/js/format.js";
+import LazyImage from '@/view/custom/LazyImage.vue';
 
 const actionsVisible = ref(false)
 const props = defineProps(["item"])
@@ -179,6 +182,7 @@ const emit = defineEmits(['edit', 'playlist', 'cover', 'del', 'rate'])
   cursor: pointer;
   transition: filter 0.18s ease, transform 0.18s ease;
 }
+.cover-image.lazy-image-placeholder { cursor: pointer; }
 
 .cover-image-container:not(.is-disabled):hover .cover-image {
   transform: scale(1.03);

@@ -161,7 +161,7 @@
 </template>
 
 <script setup>
-import {computed, onActivated, onDeactivated, onMounted, onUnmounted, ref} from "vue";
+import {computed, onActivated, onDeactivated, onMounted, ref} from "vue";
 import {ArrowLeft, ArrowRight, CircleCheck, Download, List, Upload} from "@element-plus/icons-vue";
 import {formatDate, fromNow} from "@/js/format.js";
 import * as http from "@/js/http.js";
@@ -172,6 +172,7 @@ import CoverView from "@/view/home/CoverView.vue";
 import DelAniView from "@/view/home/DelAniView.vue";
 import BgmRateView from "@/view/home/BgmRateView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
+import {usePolling} from "@/js/usePolling.js";
 
 const weekLabels = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六']
 const downloadingStates = ['forcedDL', 'downloading', 'forcedMetaDL', 'metaDL', 'stalledDL', 'checkingDL', 'queuedDL', 'allocating', 'moving']
@@ -191,8 +192,6 @@ const bgmRateRef = ref()
 const config = ref({
   procrastinatingDay: 14
 })
-
-let timer
 
 const todayLabel = computed(() => weekLabels[new Date().getDay()])
 const flatAnis = computed(() => weekList.value.flatMap(week => week.items || []))
@@ -295,22 +294,11 @@ const loadAll = async () => {
   }
 }
 
-const startPolling = () => {
-  if (timer) {
-    return
-  }
-  timer = setInterval(loadTorrents, 5000)
-}
-
-const stopPolling = () => {
-  clearInterval(timer)
-  timer = undefined
-}
+const torrentPolling = usePolling(loadTorrents, 5000, {immediate: false})
 
 onMounted(loadAll)
-onActivated(startPolling)
-onDeactivated(stopPolling)
-onUnmounted(stopPolling)
+onActivated(torrentPolling.start)
+onDeactivated(torrentPolling.stop)
 </script>
 
 <style scoped>
