@@ -25,6 +25,10 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 )
 
+// backendTestHTTPClient keeps a broken handler or accidental remote request
+// from hanging a test until the package-wide go test timeout.
+var backendTestHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"runtime", "subscriptions"}})
 	if err != nil {
@@ -79,7 +83,7 @@ func TestPingAcceptsJavaRequestMethodsAndOmitsNullData(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
+		response, err := backendTestHTTPClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +102,7 @@ func TestPingAcceptsJavaRequestMethodsAndOmitsNullData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +566,7 @@ func TestHTTPMikanRejectsMalformedOrEmptySeasonBodyBeforeCallingSource(t *testin
 			}
 			request.Header.Set("Authorization", token)
 			request.Header.Set("Content-Type", "application/json")
-			response, err := http.DefaultClient.Do(request)
+			response, err := backendTestHTTPClient.Do(request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -599,7 +603,7 @@ func TestHTTPSourceConversionCanCreateVisibleSubscription(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": bgm.URL}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": bgm.URL, "tmdbApi": bgm.URL, "tmdbApiKey": "test"}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set BGM config = %#v", response)
 	}
 	converted := callJSON(t, server.URL+"/api/rssToAni", token, map[string]any{"url": "https://example.test/feed.xml", "bgmUrl": "https://bgm.tv/subject/42", "subgroup": "Group"})
@@ -729,7 +733,7 @@ func TestHTTPMikanRSSConversionResolvesLinkedBangumiSubject(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 	// Java only fetches the Mikan detail page when both optional fields are
@@ -775,7 +779,7 @@ func TestHTTPRSSConversionMatchesJavaSourceDefaults(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 
@@ -845,7 +849,7 @@ func TestHTTPSourceConversionReturnsCompleteEditableDefaults(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 
@@ -912,7 +916,7 @@ func TestHTTPRSSConversionAppliesJavaFeedDefaults(t *testing.T) {
 	defer server.Close()
 	token := login(t, server.URL)
 	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{
-		"bgmApi": serverSource.URL, "tmdb": false, "offset": true,
+		"bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false, "offset": true,
 		"standbyRss": true, "copyMasterToStandby": true,
 	}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set conversion defaults = %#v", response)
@@ -1671,7 +1675,7 @@ func TestUploadKeepsJavaExtensionAndResultEnvelope(t *testing.T) {
 	}
 	request.Header.Set("Authorization", token)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1697,7 +1701,7 @@ func getWithHeader(t *testing.T, target, token, key, value string) *http.Respons
 	}
 	request.Header.Set("Authorization", token)
 	request.Header.Set(key, value)
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1950,7 +1954,7 @@ func callJSON(t *testing.T, target, token string, body any) map[string]any {
 	if token != "" {
 		request.Header.Set("Authorization", token)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1973,7 +1977,7 @@ func get(t *testing.T, target, token string) *http.Response {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", token)
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
