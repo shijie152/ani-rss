@@ -12,9 +12,10 @@
 - 可重复差分命令：
 
   ```sh
+  ANI_RSS_ALLOW_NETWORK_TESTS=1 \
   ANI_RSS_JAVA_URL=http://127.0.0.1:<JAVA_PORT> \
   ANI_RSS_GO_URL=http://127.0.0.1:<GO_PORT> \
-  go test ./go-backend/internal/backend -run '^TestJavaGoAPIParity$' -count=1
+  go test -tags live ./go-backend/internal/backend -run '^TestJavaGoAPIParity$' -count=1
   ```
 
   该测试默认跳过，不会在普通单元测试中访问外部服务。两端必须使用同一份干净配置和订阅数据；若 Java 数据含有损坏的 `[{}]` 订阅，`listAni`、ICS 和日志结果不能作为实现差异证据。

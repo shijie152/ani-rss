@@ -1,3 +1,5 @@
+//go:build live
+
 package downloader_test
 
 import (
@@ -15,6 +17,9 @@ import (
 // supplied, it exercises the actual service's login and task inventory, which
 // catches protocol/version differences that fake-server tests cannot.
 func TestConfiguredDownloaderSmoke(t *testing.T) {
+	if os.Getenv("ANI_RSS_ALLOW_NETWORK_TESTS") != "1" {
+		t.Skip("live tests disabled; set ANI_RSS_ALLOW_NETWORK_TESTS=1")
+	}
 	cases := []struct {
 		name, typeName, host, username, password, provider string
 	}{

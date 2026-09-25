@@ -1,8 +1,13 @@
-const CACHE_VERSION = 'v2'
+// v3 invalidates v2 snapshots created before current-season aliases and
+// subscription marker refreshes were made explicit.
+const CACHE_VERSION = 'v3'
 const CACHE_PREFIX = 'ani-rss:season-catalog:'
 const MIKAN_SEARCH_CACHE_PREFIX = 'ani-rss:mikan-search:'
 
 const storageOrDefault = storage => storage || globalThis.localStorage
+
+export const resolveSeasonRequest = (season, followsCurrent) =>
+  followsCurrent ? 'current' : (season || 'current')
 
 export const seasonCacheKey = (source, season) =>
   `${CACHE_PREFIX}${CACHE_VERSION}:${source}:${encodeURIComponent(season || 'current')}`
@@ -17,6 +22,15 @@ export const preserveSeasonOptions = (current, incoming) =>
   Array.isArray(incoming) && incoming.length > 0
     ? incoming
     : (Array.isArray(current) ? current : [])
+
+// Filtered source responses omit the season selector. Keep the selector in
+// the persisted snapshot so a reload can still choose another season.
+export const withSeasonOptions = (source, data, options) => {
+  if (!data || !Array.isArray(options) || options.length === 0) return data
+  const field = source === 'mikan' ? 'seasons' : 'availableSeasons'
+  if (Array.isArray(data[field]) && data[field].length > 0) return data
+  return {...data, [field]: options}
+}
 
 const hasCatalogueItems = (source, data) => {
   const seasons = source === 'mikan' ? data?.seasons : data?.availableSeasons
@@ -69,6 +83,25 @@ export const writeSeasonCache = (source, season, data, storage = undefined, now 
     // 浏览器存储空间不足时不影响季度页面使用
   }
   return now
+}
+
+// The implicit "current" key is what a fresh page load reads before the
+// source response has selected a concrete season. Keep it in sync when the
+// user explicitly refreshes the current season, otherwise a reload can restore
+// an older snapshot even though the concrete-season key was just updated.
+export const writeSeasonCacheWithCurrentAlias = (
+  source,
+  season,
+  data,
+  storage = undefined,
+  now = Date.now(),
+  updateCurrentAlias = true
+) => {
+  const savedAt = writeSeasonCache(source, season, data, storage, now)
+  if (savedAt && updateCurrentAlias && season !== 'current') {
+    writeSeasonCache(source, 'current', data, storage, savedAt)
+  }
+  return savedAt
 }
 
 const isMikanSearchResponse = data => {

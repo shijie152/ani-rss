@@ -6,12 +6,15 @@ on:
 permissions:
   contents: write
   packages: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.31.0
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -51,7 +54,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push Docker image (Go-only)
+      - name: Build and push Docker image to GHCR (Go-only)
         uses: docker/build-push-action@v7
         with:
           context: ./
@@ -59,7 +62,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: |
-            ghcr.io/shijie152/ani-rss:latest
-            ghcr.io/shijie152/ani-rss:${{ env.version }}
+            ghcr.io/${{ github.repository_owner }}/ani-rss:latest
+            ghcr.io/${{ github.repository_owner }}/ani-rss:${{ env.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

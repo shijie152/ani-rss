@@ -1,6 +1,7 @@
 package source_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,6 +72,36 @@ func TestMikanSearchAndGroupParseHTMLFixture(t *testing.T) {
 	}
 }
 
+func TestMikanGroupDeduplicatesIdenticalMatchOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Home/Bangumi/123" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`<div class="bangumi-title">Demo</div><div class="leftbar-item"><a class="subgroup-name" data-anchor="#group-1">Group</a></div><section id="group-1"><a class="mikan-rss" href="/RSS/1"></a></section><table><tbody><tr><td><a>Demo - 01 [1080p][繁][简][日][内封][HEVC][10bit]</a><a data-clipboard-text="magnet:?xt=urn:btih=1"></a><a href="/torrent/1">torrent</a></td><td>unused</td><td>1 GiB</td><td>2026-01-02</td></tr><tr><td><a>Demo - 02 [1080p][繁][简][日][内封][HEVC][10bit]</a><a data-clipboard-text="magnet:?xt=urn:btih=2"></a><a href="/torrent/2">torrent</a></td><td>unused</td><td>1 GiB</td><td>2026-01-03</td></tr></tbody></table>`))
+	}))
+	defer server.Close()
+
+	groups, err := source.New(source.Options{MikanHost: server.URL}).MikanGroup(server.URL + "/Home/Bangumi/123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v", groups)
+	}
+	groupRegex, ok := groups[0]["groupRegex"].(map[string]any)
+	if !ok {
+		t.Fatalf("group regex missing: %#v", groups[0])
+	}
+	regexList, ok := groupRegex["regexList"].([][]map[string]any)
+	if !ok {
+		t.Fatalf("regex list = %#v", groupRegex["regexList"])
+	}
+	if len(regexList) != 1 {
+		t.Fatalf("expected one unique match option, got %d: %#v", len(regexList), regexList)
+	}
+}
+
 func TestResolveMikanSubscriptionUsesBangumiLinkInsteadOfMikanID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Home/Bangumi/123" {
@@ -120,6 +151,38 @@ func TestMikanSeasonalAndAnimeGardenUIFields(t *testing.T) {
 	groups, err := client.AnimeGardenGroup("42")
 	if err != nil || len(groups) != 1 || groups[0]["lastUpdatedAt"] != "2026-01-02T00:00:00Z" {
 		t.Fatalf("garden group fields = %#v, err=%v", groups, err)
+	}
+}
+
+func TestMikanSeasonalQueryKeepsYearAndSeasonBoundToResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Home/BangumiCoverFlowByDayOfWeek" {
+			t.Fatalf("seasonal Mikan path = %q", r.URL.Path)
+		}
+		if r.URL.Query().Get("year") != "2026" {
+			t.Fatalf("seasonal Mikan year = %q", r.URL.Query().Get("year"))
+		}
+		season := r.URL.Query().Get("seasonStr")
+		if season != "春" && season != "夏" {
+			t.Fatalf("seasonal Mikan season = %q", season)
+		}
+		id := map[string]string{"春": "123", "夏": "456"}[season]
+		_, _ = io.WriteString(w, `<div class="date-select"><span class="date-text">2026 `+season+`</span><div class="dropdown-menu"><a data-year="2026" data-season="`+season+`">`+season+`</a></div></div><div class="sk-bangumi"><h3>星期一</h3><ul class="an-ul"><li><span data-src="/cover.jpg"></span><a href="/Home/Bangumi/`+id+`">`+season+` demo</a></li></ul></div>`)
+	}))
+	defer server.Close()
+
+	client := source.New(source.Options{MikanHost: server.URL})
+	for _, season := range []string{"春", "夏"} {
+		result, err := client.Mikan("", map[string]any{"year": 2026, "season": season})
+		if err != nil {
+			t.Fatal(err)
+		}
+		weeks := result["weeks"].([]any)
+		item := weeks[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+		want := season + " demo"
+		if item["title"] != want {
+			t.Fatalf("seasonal Mikan %q title = %#v, want %q", season, item["title"], want)
+		}
 	}
 }
 

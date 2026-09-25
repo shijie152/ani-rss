@@ -1,3 +1,5 @@
+//go:build live
+
 package backend_test
 
 import (
@@ -17,6 +19,9 @@ import (
 // downloader, updater, subscription write, cache deletion, or remote source
 // request is reachable from this corpus.
 func FuzzJavaGoAPIDefaults(f *testing.F) {
+	if os.Getenv("ANI_RSS_ALLOW_NETWORK_TESTS") != "1" {
+		f.Skip("live tests disabled; set ANI_RSS_ALLOW_NETWORK_TESTS=1")
+	}
 	javaURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ANI_RSS_JAVA_URL")), "/")
 	goURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ANI_RSS_GO_URL")), "/")
 	if javaURL == "" || goURL == "" {

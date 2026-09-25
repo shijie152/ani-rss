@@ -198,7 +198,8 @@ const addAni = (fun) => {
   http.addAni(ani.value)
       .then(res => {
         ElMessage.success(res.message)
-        window.$reLoadList()
+        window.$reLoadList?.()
+        window.dispatchEvent(new CustomEvent('ani-rss:subscriptions-changed'))
         dialogVisible.value = false
       }).finally(fun)
 }

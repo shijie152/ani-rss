@@ -9,9 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
 )
+
+var gatewayTestHTTPClient = testutil.LocalHTTPClient(10 * time.Second)
 
 func TestGatewayServesUIAndFallsBackToIndexForClientRoutes(t *testing.T) {
 	uiDir := t.TempDir()
@@ -22,7 +27,7 @@ func TestGatewayServesUIAndFallsBackToIndexForClientRoutes(t *testing.T) {
 	for _, path := range []string{"/", "/settings"} {
 		request, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
 		request.Header.Set("Accept", "text/html")
-		response, err := http.DefaultClient.Do(request)
+		response, err := gatewayTestHTTPClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -32,7 +37,7 @@ func TestGatewayServesUIAndFallsBackToIndexForClientRoutes(t *testing.T) {
 			t.Fatalf("GET %s: status=%d body=%q", path, response.StatusCode, body)
 		}
 	}
-	response, err := http.Get(server.URL + "/assets/app.js")
+	response, err := gatewayTestHTTPClient.Get(server.URL + "/assets/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +54,7 @@ func TestGatewayServesRegisteredRoutesAndReturnsJSON404ForUnknownAPI(t *testing.
 	})
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: []gateway.Route{{Domain: "runtime", Method: http.MethodPost, Path: "/api/ping", Handler: handler}}, GoDomains: []string{"runtime"}}))
 	defer server.Close()
-	response, err := http.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
+	response, err := gatewayTestHTTPClient.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +62,7 @@ func TestGatewayServesRegisteredRoutesAndReturnsJSON404ForUnknownAPI(t *testing.
 		t.Fatalf("registered route status = %d", response.StatusCode)
 	}
 	response.Body.Close()
-	response, err = http.Post(server.URL+"/api/not-found", "application/json", strings.NewReader("{}"))
+	response, err = gatewayTestHTTPClient.Post(server.URL+"/api/not-found", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +83,7 @@ func TestGatewayCanDisableGoDomainWithoutSecondaryRouting(t *testing.T) {
 	handler := gateway.New(gateway.Config{GoRoutes: []gateway.Route{{Domain: "runtime", Method: http.MethodPost, Path: "/api/ping", Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "go") })}}, GoDomains: []string{"runtime"}})
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	response, err := http.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
+	response, err := gatewayTestHTTPClient.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +93,7 @@ func TestGatewayCanDisableGoDomainWithoutSecondaryRouting(t *testing.T) {
 		t.Fatalf("enabled body = %q", body)
 	}
 	handler.SetGoDomains(nil)
-	response, err = http.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
+	response, err = gatewayTestHTTPClient.Post(server.URL+"/api/ping", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}

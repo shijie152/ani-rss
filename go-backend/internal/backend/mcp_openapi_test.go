@@ -95,7 +95,7 @@ func TestMCPSupportsServerSentEventResponse(t *testing.T) {
 	httpRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/mcp", bytes.NewReader(body))
 	httpRequest.Header.Set("api-key", "test-key")
 	httpRequest.Header.Set("Accept", "text/event-stream")
-	response, err := http.DefaultClient.Do(httpRequest)
+	response, err := backendTestHTTPClient.Do(httpRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestOpenAPIDescribesEveryGoRouteAndAuthContract(t *testing.T) {
 	app, server := newMCPTestServer(t, nil)
 	defer server.Close()
 	defer app.Close()
-	response, err := http.Get(server.URL + "/v3/api-docs")
+	response, err := backendTestHTTPClient.Get(server.URL + "/v3/api-docs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestOpenAPIDescribesEveryGoRouteAndAuthContract(t *testing.T) {
 	}
 	response.Body.Close()
 
-	uiResponse, err := http.Get(server.URL + "/swagger-ui/index.html")
+	uiResponse, err := backendTestHTTPClient.Get(server.URL + "/swagger-ui/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func mcpRequest(t *testing.T, endpoint, key, session string, payload map[string]
 	if session != "" {
 		request.Header.Set("Mcp-Session-Id", session)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func callJSONWithAPIKey(t *testing.T, target, key string, body any) map[string]a
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("api-key", key)
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

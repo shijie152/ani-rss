@@ -90,7 +90,7 @@
                      filterable
                      :loading="seasonLoading"
                      placeholder="选择季度"
-                     @change="loadSource()">
+                     @change="selectSeason">
             <el-option v-for="option in seasonOptions"
                        :key="option.value"
                        :label="option.label"
@@ -161,7 +161,13 @@ import * as http from "@/js/http.js";
 import {proxyImage} from "@/js/global.js";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import AddView from "@/view/home/AddView.vue";
-import {preserveSeasonOptions, readSeasonCache, writeSeasonCache} from "./seasonCatalogCache.js";
+import {
+  preserveSeasonOptions,
+  readSeasonCache,
+  resolveSeasonRequest,
+  withSeasonOptions,
+  writeSeasonCacheWithCurrentAlias
+} from "./seasonCatalogCache.js";
 
 const source = ref('mikan')
 const loading = ref(false)
@@ -170,8 +176,12 @@ const activeWeek = ref('')
 const weeks = ref([])
 const mikanSeasons = ref([])
 const mikanSeason = ref('')
+const mikanFollowsCurrent = ref(true)
 const aniBTSeasons = ref([])
 const aniBTSeason = ref('')
+const aniBTFollowsCurrent = ref(true)
+const mikanCurrentSeason = ref('')
+const aniBTCurrentSeason = ref('')
 const resourceVisible = ref(false)
 const resourceLoading = ref(false)
 const resourceTitle = ref('')
@@ -203,7 +213,20 @@ const cacheTimeLabel = computed(() => cacheUpdatedAt.value
 
 const readCache = (sourceName, season) => readSeasonCache(sourceName, season)
 const writeCache = (sourceName, season, data) => {
-  const savedAt = writeSeasonCache(sourceName, season, data)
+  const currentSeason = sourceName === 'mikan' ? mikanCurrentSeason.value : aniBTCurrentSeason.value
+  const cacheData = withSeasonOptions(
+      sourceName,
+      data,
+      sourceName === 'mikan' ? mikanSeasons.value : aniBTSeasons.value
+  )
+  const savedAt = writeSeasonCacheWithCurrentAlias(
+      sourceName,
+      season,
+      cacheData,
+      undefined,
+      Date.now(),
+      season === 'current' || season === currentSeason
+  )
   if (savedAt) cacheUpdatedAt.value = savedAt
 }
 
@@ -222,12 +245,22 @@ const applyMikanData = data => {
   setWeeks(data.weeks)
 }
 
+const rememberMikanCurrentSeason = data => {
+  if (!data?.seasons) return
+  const selected = data.seasons.find(item => item.select)
+  if (selected?.seasonLabel) mikanCurrentSeason.value = selected.seasonLabel
+}
+
 const loadMikan = async (force = false, sequence = loadSequence) => {
-  const requestedSeason = mikanSeason.value || 'current'
+  const requestedSeason = resolveSeasonRequest(mikanSeason.value, mikanFollowsCurrent.value)
   const cached = readCache('mikan', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
     if (sequence !== loadSequence) return
+    if (requestedSeason === 'current') rememberMikanCurrentSeason(cached.data)
     applyMikanData(cached.data)
+    if (requestedSeason === 'current' && !mikanCurrentSeason.value) {
+      mikanCurrentSeason.value = mikanSeason.value
+    }
     cacheUpdatedAt.value = cached.savedAt
     seasonLoading.value = false
     loading.value = false
@@ -237,11 +270,19 @@ const loadMikan = async (force = false, sequence = loadSequence) => {
   loading.value = true
   loadError.value = ''
   try {
-    const selected = mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
+    const selected = mikanFollowsCurrent.value
+        ? undefined
+        : mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
     const res = await http.mikan('', selected || {})
     if (sequence !== loadSequence) return
     const data = res.data || {}
+    if (requestedSeason === 'current') {
+      rememberMikanCurrentSeason(data)
+    }
     applyMikanData(data)
+    if (requestedSeason === 'current' && !mikanCurrentSeason.value) {
+      mikanCurrentSeason.value = mikanSeason.value
+    }
     writeCache('mikan', requestedSeason, data)
   } catch (e) {
     if (sequence !== loadSequence) return
@@ -268,10 +309,13 @@ const applyAniBTData = data => {
 }
 
 const loadAniBT = async (force = false, sequence = loadSequence) => {
-  const requestedSeason = aniBTSeason.value || 'current'
+  const requestedSeason = resolveSeasonRequest(aniBTSeason.value, aniBTFollowsCurrent.value)
   const cached = readCache('ani-bt', requestedSeason)
   if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
     if (sequence !== loadSequence) return
+    if (requestedSeason === 'current' && cached.data?.requestedSeason) {
+      aniBTCurrentSeason.value = cached.data.requestedSeason
+    }
     applyAniBTData(cached.data)
     cacheUpdatedAt.value = cached.savedAt
     seasonLoading.value = false
@@ -282,9 +326,12 @@ const loadAniBT = async (force = false, sequence = loadSequence) => {
   loading.value = true
   loadError.value = ''
   try {
-    const res = await http.aniBT(aniBTSeason.value, '', '')
+    const res = await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')
     if (sequence !== loadSequence) return
     const data = res.data || {}
+    if (requestedSeason === 'current' && data.requestedSeason) {
+      aniBTCurrentSeason.value = data.requestedSeason
+    }
     applyAniBTData(data)
     writeCache('ani-bt', requestedSeason, data)
   } catch (e) {
@@ -310,6 +357,16 @@ const loadSource = (force = false) => {
   cacheUpdatedAt.value = 0
   loadError.value = ''
   return source.value === 'mikan' ? loadMikan(force, sequence) : loadAniBT(force, sequence)
+}
+const selectSeason = () => {
+  if (source.value === 'mikan') {
+    const selected = mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
+    mikanFollowsCurrent.value = selected?.select === true
+        || Boolean(mikanCurrentSeason.value && mikanSeason.value === mikanCurrentSeason.value)
+  } else {
+    aniBTFollowsCurrent.value = Boolean(aniBTCurrentSeason.value && aniBTSeason.value === aniBTCurrentSeason.value)
+  }
+  loadSource()
 }
 const changeSource = () => {
   weeks.value = []
@@ -425,11 +482,17 @@ const scheduleNightlyRefresh = () => {
   }, next.getTime() - now.getTime())
 }
 
+const handleSubscriptionsChanged = () => loadSource(true)
+
 onMounted(() => {
+  window.addEventListener('ani-rss:subscriptions-changed', handleSubscriptionsChanged)
   loadSource()
   scheduleNightlyRefresh()
 })
-onBeforeUnmount(() => clearTimeout(nightlyRefreshTimer))
+onBeforeUnmount(() => {
+  clearTimeout(nightlyRefreshTimer)
+  window.removeEventListener('ani-rss:subscriptions-changed', handleSubscriptionsChanged)
+})
 </script>
 
 <style scoped>

@@ -11,6 +11,16 @@
 - `go-backend/internal/backend/api_parity_test.go`
 - `go-backend/internal/backend/api_default_parity_test.go`
 
+这两个文件带有 `live` build tag，不会进入普通 `go test ./...`。运行前必须明确允许网络：
+
+```bash
+ANI_RSS_ALLOW_NETWORK_TESTS=1 \
+  go test -tags live ./go-backend/internal/backend
+```
+
+并设置 `ANI_RSS_JAVA_URL`、`ANI_RSS_GO_URL`；变更探针仍需额外设置
+`ANI_RSS_PARITY_INCLUDE_MUTATIONS=1`，且只能针对一次性服务实例。
+
 ## 默认行为矩阵
 
 `FuzzJavaGoAPIDefaults` 对 48 个安全 API 场景组合测试以下边界：
@@ -28,9 +38,10 @@
 在全新临时配置目录启动 Java 3.2.32 和最新 Go 二进制后：
 
 ```sh
+ANI_RSS_ALLOW_NETWORK_TESTS=1 \
 ANI_RSS_JAVA_URL=http://127.0.0.1:<JAVA_PORT> \
 ANI_RSS_GO_URL=http://127.0.0.1:<GO_PORT> \
-go test ./internal/backend -run '^TestJavaGoAPIParity$' -count=1
+go test -tags live ./internal/backend -run '^TestJavaGoAPIParity$' -count=1
 ```
 
 - 非变更确定性差分全部通过；变更探针默认跳过。

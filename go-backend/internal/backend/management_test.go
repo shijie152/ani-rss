@@ -267,7 +267,7 @@ func postRaw(t *testing.T, target, token, contentType, body string) *http.Respon
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func multipartRequest(t *testing.T, target, token, filename string, content []by
 	}
 	request.Header.Set("Authorization", token)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

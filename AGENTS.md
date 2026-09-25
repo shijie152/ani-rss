@@ -12,6 +12,10 @@ This repo uses the default triage labels: `needs-triage`, `needs-info`, `ready-f
 
 This is a single-context repository with a root `CONTEXT.md` and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
 
+### Go tests
+
+When adding or changing Go tests, read `docs/testing-core-logic.md`; test-boundary expectations and live-service rules are documented in `docs/migration/go-backend-rewrite-spec.md`.
+
 ### Scratch workspace
 
 Use `.scratch/.tmp/` for throwaway artifacts: soak-test data, throwaway binaries, downloaded fixtures, and local logs. It is git-ignored. Do not use `/tmp` — macOS cleans it and full disks have silently wiped run state mid-verification.

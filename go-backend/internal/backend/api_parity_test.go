@@ -1,3 +1,5 @@
+//go:build live
+
 package backend_test
 
 import (
@@ -20,6 +22,9 @@ import (
 // failures. Probes that mutate application state are available explicitly via
 // ANI_RSS_PARITY_INCLUDE_MUTATIONS=1 and must run against disposable services.
 func TestJavaGoAPIParity(t *testing.T) {
+	if os.Getenv("ANI_RSS_ALLOW_NETWORK_TESTS") != "1" {
+		t.Skip("live tests disabled; set ANI_RSS_ALLOW_NETWORK_TESTS=1")
+	}
 	javaURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ANI_RSS_JAVA_URL")), "/")
 	goURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ANI_RSS_GO_URL")), "/")
 	if javaURL == "" || goURL == "" {

@@ -34,7 +34,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	h := gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions"}})
 	server := httptest.NewServer(h)
 	defer server.Close()
-	response, err := http.Get(server.URL + "/api/ping")
+	response, err := backendTestHTTPClient.Get(server.URL + "/api/ping")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("ping = %d", response.StatusCode)
 	}
-	response, err = http.Post(server.URL+"/api/config", "application/json", nil)
+	response, err = backendTestHTTPClient.Post(server.URL+"/api/config", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	if denied["code"] != float64(http.StatusForbidden) {
 		t.Fatalf("denied = %#v", denied)
 	}
-	response, err = http.Post(server.URL+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"21232f297a57a5a743894a0e4a801fc3"}`))
+	response, err = backendTestHTTPClient.Post(server.URL+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"21232f297a57a5a743894a0e4a801fc3"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestPingAcceptsJavaRequestMethodsAndOmitsNullData(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
+		response, err := backendTestHTTPClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +98,7 @@ func TestPingAcceptsJavaRequestMethodsAndOmitsNullData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestHTTPMikanRejectsMalformedOrEmptySeasonBodyBeforeCallingSource(t *testin
 			}
 			request.Header.Set("Authorization", token)
 			request.Header.Set("Content-Type", "application/json")
-			response, err := http.DefaultClient.Do(request)
+			response, err := backendTestHTTPClient.Do(request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -599,7 +599,7 @@ func TestHTTPSourceConversionCanCreateVisibleSubscription(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": bgm.URL}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": bgm.URL, "tmdbApi": bgm.URL, "tmdbApiKey": "test"}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set BGM config = %#v", response)
 	}
 	converted := callJSON(t, server.URL+"/api/rssToAni", token, map[string]any{"url": "https://example.test/feed.xml", "bgmUrl": "https://bgm.tv/subject/42", "subgroup": "Group"})
@@ -729,7 +729,7 @@ func TestHTTPMikanRSSConversionResolvesLinkedBangumiSubject(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 	// Java only fetches the Mikan detail page when both optional fields are
@@ -775,7 +775,7 @@ func TestHTTPRSSConversionMatchesJavaSourceDefaults(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"mikanHost": serverSource.URL, "bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 
@@ -845,7 +845,7 @@ func TestHTTPSourceConversionReturnsCompleteEditableDefaults(t *testing.T) {
 	server := httptest.NewServer(gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions", "sources"}}))
 	defer server.Close()
 	token := login(t, server.URL)
-	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": serverSource.URL, "tmdb": false}); response["code"] != float64(http.StatusOK) {
+	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{"bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set source config = %#v", response)
 	}
 
@@ -912,7 +912,7 @@ func TestHTTPRSSConversionAppliesJavaFeedDefaults(t *testing.T) {
 	defer server.Close()
 	token := login(t, server.URL)
 	if response := callJSON(t, server.URL+"/api/setConfig", token, model.Config{
-		"bgmApi": serverSource.URL, "tmdb": false, "offset": true,
+		"bgmApi": serverSource.URL, "tmdbApi": serverSource.URL, "tmdbApiKey": "test", "tmdb": false, "offset": true,
 		"standbyRss": true, "copyMasterToStandby": true,
 	}); response["code"] != float64(http.StatusOK) {
 		t.Fatalf("set conversion defaults = %#v", response)
@@ -1671,7 +1671,7 @@ func TestUploadKeepsJavaExtensionAndResultEnvelope(t *testing.T) {
 	}
 	request.Header.Set("Authorization", token)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response, err := http.DefaultClient.Do(request)
+	response, err := backendTestHTTPClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1687,21 +1687,6 @@ func TestUploadKeepsJavaExtensionAndResultEnvelope(t *testing.T) {
 	if _, ok := payload["data"]; !ok {
 		t.Fatalf("result envelope omitted data: %#v", payload)
 	}
-}
-
-func getWithHeader(t *testing.T, target, token, key, value string) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", token)
-	request.Header.Set(key, value)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
 }
 
 func testCollectionTorrent() []byte {
@@ -1925,57 +1910,4 @@ func TestAppCloseStopsAndWaitsForSchedulers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scheduler did not finish after App.Close")
 	}
-}
-
-func login(t *testing.T, baseURL string) string {
-	t.Helper()
-	response := callJSON(t, baseURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})
-	if response["code"] != float64(http.StatusOK) {
-		t.Fatalf("login = %#v", response)
-	}
-	return response["data"].(string)
-}
-
-func callJSON(t *testing.T, target, token string, body any) map[string]any {
-	t.Helper()
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		request.Header.Set("Authorization", token)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	data, err = io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
-		t.Fatalf("%s: %v", string(data), err)
-	}
-	return payload
-}
-
-func get(t *testing.T, target, token string) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", token)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
 }
