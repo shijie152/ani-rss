@@ -5,7 +5,10 @@
 - `pnpm test`：运行 Node 行为测试。查询参数使用 1000 组随机边界字符，轮询、订阅通知、Mikan 调度和季度缓存覆盖用户可观察行为。
 - `pnpm test:mutation`：运行实际变异测试。脚本会临时修改请求编码、请求去重、请求 key、轮询并发/隐藏处理、Mikan 定时器等 7 个行为，并要求测试杀死每个变异。
 - `pnpm build`：验证路由懒加载、图标按需注册、LazyImage 组件和 CSS 性能契约可以正常编译。
+- `pnpm test:browser`：启动 Vite 开发服务，用 mock API 在真实 Chromium 中验证季度页动态路由和 Mikan 数据渲染。
 
 当前结果：29 个 Node 测试通过，7/7 个 UI 变异被杀死。
+
+CI 运行浏览器测试前需要执行 `pnpm exec playwright install --with-deps chromium`。
 
 变异临时文件只写入 `.scratch/.tmp/ui-mutations/`，不会修改工作区源码。

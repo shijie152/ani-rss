@@ -1,7 +1,7 @@
 <template>
   <div class="flex-center about-container">
     <div class="flex about-header">
-      <img alt="icon.svg" height="80" src="/public/icon.svg" width="80"/>
+      <img alt="icon.svg" height="80" src="/icon.svg" width="80"/>
       <div>
         <h1>ANI-RSS</h1>
         <el-tooltip

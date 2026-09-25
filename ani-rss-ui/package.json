@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test src/*.test.mjs src/js/*.test.mjs src/view/home/*.test.mjs",
-    "test:mutation": "node ../scripts/test-ui-mutations.mjs"
+    "test:mutation": "node ../scripts/test-ui-mutations.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -25,6 +26,7 @@
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@vitejs/plugin-vue": "^6.0.8",
     "terser": "^5.51.2",
     "unplugin-auto-import": "^21.1.0",

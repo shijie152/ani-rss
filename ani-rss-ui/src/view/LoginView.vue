@@ -4,7 +4,7 @@
     <div id="login-page" class="flex-center">
       <div id="form">
         <div style="text-align: center;">
-          <img src="/public/icon.svg" height="80" width="80" alt="icon.svg"/>
+          <img src="/icon.svg" height="80" width="80" alt="icon.svg"/>
         </div>
         <h2 class="title-h2">ANI-RSS</h2>
         <el-form @submit.prevent

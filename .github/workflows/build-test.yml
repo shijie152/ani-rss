@@ -22,12 +22,25 @@ jobs:
         run: FUZZ_TIME=5s bash scripts/test-core-fuzz.sh
       - name: Mutation test core business packages
         run: bash scripts/test-core-mutations.sh
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.31.0
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: ani-rss-ui/pnpm-lock.yaml
+      - name: Test frontend behavior and mutations
+        run: |
+          corepack enable
+          pnpm --dir ani-rss-ui install --frozen-lockfile
+          pnpm --dir ani-rss-ui test
+          pnpm --dir ani-rss-ui test:mutation
+          pnpm --dir ani-rss-ui exec playwright install --with-deps chromium
+          pnpm --dir ani-rss-ui test:browser
+          pnpm --dir ani-rss-ui build
       - name: Build release smoke artifacts
         run: |
           corepack enable
