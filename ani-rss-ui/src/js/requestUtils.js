@@ -11,7 +11,7 @@ export const withQuery = (url, params = {}, base = 'http://localhost/') => {
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) parsed.searchParams.set(key, String(value))
   }
-  return `${parsed.pathname}${parsed.search}`
+  return /^[a-z][a-z\d+.-]*:/i.test(url) ? parsed.toString() : `${parsed.pathname}${parsed.search}`
 }
 
 export const requestKey = (url, method, body) => {

@@ -10,7 +10,7 @@ await mkdir(tempDir, {recursive: true})
 const loadMutant = async (relativePath, label, mutate) => {
   const originalPath = join(repo, 'ani-rss-ui', relativePath)
   const original = await readFile(originalPath, 'utf8')
-  const mutant = mutate(original)
+  let mutant = mutate(original)
   assert.notEqual(mutant, original, `${label}: mutation did not change source`)
   const target = join(tempDir, `${label.replaceAll(/[^a-z0-9_-]/gi, '_')}.mjs`)
   await writeFile(target, mutant)
@@ -61,7 +61,7 @@ await kill(
 await kill(
   'polling-no-overlap',
   'src/js/pollingController.js',
-  source => source.replace('if (running) return', 'if (false) return'),
+  source => source.replace('inFlight || isHidden()', 'isHidden()'),
   async ({createPollingController}) => {
     let calls = 0
     let release
@@ -70,7 +70,7 @@ await kill(
       return new Promise(resolve => { release = resolve })
     }, 1000, {scheduleTimer: () => ({}), cancelTimer: () => {}, isHidden: () => false})
     controller.start()
-    controller.start()
+    controller.run()
     assert.equal(calls, 1)
     release()
     controller.stop()
@@ -80,7 +80,7 @@ await kill(
 await kill(
   'polling-hidden-stop',
   'src/js/pollingController.js',
-  source => source.replace('if (!running || !wanted || isHidden()) return', 'if (!running || !wanted) return'),
+  source => source.replace('if (!running || !wanted || inFlight || isHidden()) return', 'if (!running || !wanted || inFlight) return'),
   async ({createPollingController}) => {
     let calls = 0
     const controller = createPollingController(() => { calls++ }, 1000, {
@@ -96,11 +96,11 @@ await kill(
 
 await kill(
   'mikan-single-timer',
-  'src/view/home/mikanCacheScheduler.js',
-  source => source.replace('if (timer || listeners.size === 0) return', 'if (listeners.size === 0) return'),
-  ({createMikanCacheScheduler}) => {
+  'src/js/dailyScheduler.js',
+  source => source.replace('if (timer !== undefined || listeners.size === 0) return', 'if (listeners.size === 0) return'),
+  ({createDailyRefreshRegistry}) => {
     const timers = []
-    const scheduler = createMikanCacheScheduler({
+    const scheduler = createDailyRefreshRegistry({
       now: () => new Date('2026-09-25T02:00:00Z'),
       scheduleTimer: callback => { const timer = {callback}; timers.push(timer); return timer },
       cancelTimer: () => {}
@@ -113,11 +113,11 @@ await kill(
 
 await kill(
   'mikan-cancel-timer',
-  'src/view/home/mikanCacheScheduler.js',
+  'src/js/dailyScheduler.js',
   source => source.replace('cancelTimer(timer)', 'void timer'),
-  ({createMikanCacheScheduler}) => {
+  ({createDailyRefreshRegistry}) => {
     const timers = []
-    const scheduler = createMikanCacheScheduler({
+    const scheduler = createDailyRefreshRegistry({
       now: () => new Date('2026-09-25T02:00:00Z'),
       scheduleTimer: callback => { const timer = {callback, cancelled: false}; timers.push(timer); return timer },
       cancelTimer: timer => { timer.cancelled = true }

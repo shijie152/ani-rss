@@ -10,27 +10,30 @@ export const createPollingController = (task, interval, {
   let timer
   let running = false
   let wanted = false
+  let inFlight = false
 
   const clear = () => {
-    if (timer) cancelTimer(timer)
+    if (timer !== undefined) cancelTimer(timer)
     timer = undefined
   }
 
   const schedule = (delay = interval) => {
     clear()
-    if (running && wanted && !isHidden()) {
+    if (running && wanted && !inFlight && !isHidden()) {
       timer = scheduleTimer(tick, delay)
     }
   }
 
   const tick = async () => {
     timer = undefined
-    if (!running || !wanted || isHidden()) return
+    if (!running || !wanted || inFlight || isHidden()) return
+    inFlight = true
     try {
       await task()
     } catch (_) {
       // 业务层负责展示错误；轮询本身必须继续工作。
     } finally {
+      inFlight = false
       schedule(interval)
     }
   }

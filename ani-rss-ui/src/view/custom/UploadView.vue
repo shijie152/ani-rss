@@ -25,7 +25,7 @@
 <script setup>
 
 import {computed, ref} from "vue";
-import {authorization} from "@/js/global.js";
+import api from "@/js/api.js";
 
 const props = defineProps({
   url: String,
@@ -63,14 +63,7 @@ let uploadFile = async (file) => {
   const formData = new FormData();
   formData.append("file", file)
 
-  const res = await fetch(props.url, {
-    method: 'POST',
-    body: formData,
-    headers: {
-      'Authorization': authorization.value
-    }
-  });
-  return await res.json();
+  return await api.post(props.url, formData);
 }
 
 let changeFile = () => {

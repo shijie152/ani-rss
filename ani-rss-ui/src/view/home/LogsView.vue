@@ -107,6 +107,7 @@
 import {computed, nextTick, onActivated, ref} from "vue";
 import {Search} from "@element-plus/icons-vue";
 import {authorization} from "@/js/global.js";
+import {withQuery} from "@/js/requestUtils.js";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import * as http from "@/js/http.js";
@@ -198,7 +199,7 @@ const clearLogs = () => {
 }
 
 const downloadLogs = () => {
-  window.open(`api/downloadLogs?s=${authorization.value}`)
+  window.open(withQuery('api/downloadLogs', {s: authorization.value}))
 }
 
 onActivated(getLogs)

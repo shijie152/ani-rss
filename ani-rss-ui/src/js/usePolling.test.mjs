@@ -84,3 +84,49 @@ test('paused polling resumes only when it was active before the page was hidden'
   controller.resume()
   assert.equal(calls, 0)
 })
+
+test('pause and resume do not overlap an in-flight task', async () => {
+  const fake = clock()
+  let calls = 0
+  let release
+  const controller = createPollingController(() => {
+    calls++
+    return new Promise(resolve => { release = resolve })
+  }, 5000, {
+    scheduleTimer: fake.schedule,
+    cancelTimer: fake.cancel,
+    isHidden: () => false
+  })
+
+  controller.start()
+  controller.pause()
+  controller.resume()
+  controller.run()
+  assert.equal(calls, 1)
+  release()
+  await Promise.resolve()
+  assert.equal(fake.timers.filter(timer => !timer.cancelled).length, 1)
+})
+
+test('stop and start while a task is pending wait for the old task', async () => {
+  const fake = clock()
+  let calls = 0
+  let release
+  const controller = createPollingController(() => {
+    calls++
+    return new Promise(resolve => { release = resolve })
+  }, 5000, {
+    scheduleTimer: fake.schedule,
+    cancelTimer: fake.cancel,
+    isHidden: () => false
+  })
+
+  controller.start()
+  controller.stop()
+  controller.start()
+  controller.run()
+  assert.equal(calls, 1)
+  release()
+  await Promise.resolve()
+  assert.equal(fake.timers.filter(timer => !timer.cancelled).length, 1)
+})

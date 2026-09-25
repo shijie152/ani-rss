@@ -172,6 +172,7 @@ import {
   writeSeasonCacheWithCurrentAlias
 } from "./seasonCatalogCache.js";
 import {onSubscriptionsChanged} from '@/js/subscriptionChanges.js';
+import {registerDailyRefreshScheduler} from '@/js/dailyScheduler.js';
 
 const source = ref('mikan')
 const loading = ref(false)
@@ -198,7 +199,6 @@ const cacheUpdatedAt = ref(0)
 const loadError = ref('')
 
 const SEASON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
-let nightlyRefreshTimer
 let loadSequence = 0
 
 const sourceLabel = computed(() => source.value === 'mikan' ? 'Mikan' : 'AniBT')
@@ -474,26 +474,19 @@ const openRss = rss => {
   if (rss) window.open(rss, '_blank', 'noopener')
 }
 
-const scheduleNightlyRefresh = () => {
-  clearTimeout(nightlyRefreshTimer)
-  const now = new Date()
-  const next = new Date(now)
-  next.setHours(3, 0, 0, 0)
-  if (next <= now) next.setDate(next.getDate() + 1)
-  nightlyRefreshTimer = window.setTimeout(async () => {
-    await loadSource(true)
-    scheduleNightlyRefresh()
-  }, next.getTime() - now.getTime())
-}
-
 let unsubscribeSubscriptionsChanged
+let unregisterNightlyRefresh
 onMounted(() => {
   unsubscribeSubscriptionsChanged = onSubscriptionsChanged(() => loadSource(true))
   loadSource()
-  scheduleNightlyRefresh()
+  unregisterNightlyRefresh = registerDailyRefreshScheduler(
+      Symbol('season-catalog'),
+      () => loadSource(true),
+      'season'
+  )
 })
 onBeforeUnmount(() => {
-  clearTimeout(nightlyRefreshTimer)
+  unregisterNightlyRefresh?.()
   unsubscribeSubscriptionsChanged?.()
 })
 </script>

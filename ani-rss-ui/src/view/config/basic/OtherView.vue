@@ -76,6 +76,7 @@ import {ref} from "vue";
 import * as http from "@/js/http.js";
 import {Github} from "@vicons/fa";
 import {getBaseUrl} from "@/js/global.js";
+import {withQuery} from "@/js/requestUtils.js";
 
 let openUrl = (url) => window.open(url)
 
@@ -92,12 +93,12 @@ let clearCache = () => {
 }
 
 let copyEmbyApi = () => {
-  let url = `${getBaseUrl()}api/embyWebHook?api-key=${props.config.apiKey}`;
+  let url = withQuery(`${getBaseUrl()}api/embyWebHook`, {'api-key': props.config.apiKey});
   copy(url)
 }
 
 let copyIcs = () => {
-  let url = `${getBaseUrl()}api/calendar.ics?api-key=${props.config.apiKey}`;
+  let url = withQuery(`${getBaseUrl()}api/calendar.ics`, {'api-key': props.config.apiKey});
   copy(url)
 }
 
@@ -113,4 +114,3 @@ let copy = (v) => {
 
 let props = defineProps(['config'])
 </script>
-

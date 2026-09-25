@@ -11,6 +11,7 @@ import {ElMessage, ElMessageBox} from "element-plus";
 import {markRaw, ref} from "vue";
 import {WarnTriangleFilled} from "@element-plus/icons-vue";
 import UploadView from "@/view/custom/UploadView.vue";
+import {withQuery} from "@/js/requestUtils.js";
 
 let uploadRef = ref()
 
@@ -49,7 +50,7 @@ let callback = res => {
 
 let exportConfig = () => {
   let element = document.createElement('a');
-  element.href = `api/exportConfig?s=${authorization.value}`
+  element.href = withQuery('api/exportConfig', {s: authorization.value})
 
   document.body.appendChild(element);
 

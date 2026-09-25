@@ -55,13 +55,15 @@ const fetch_ = (url, method, body, options = {}) => {
 const requestImpl = async (url, method, body, options) => {
     const headers = {...(options.headers || {})}
     if (authorization.value) headers.Authorization = authorization.value
-    if (body !== undefined && body !== null && body !== '') headers['Content-Type'] = 'application/json'
+    const hasBody = body !== undefined && body !== null && body !== ''
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+    if (hasBody && !isFormData) headers['Content-Type'] = 'application/json'
     const {signal, cleanup} = makeSignal(options.signal, options.timeout ?? REQUEST_TIMEOUT)
 
     try {
         const response = await fetch(url, {
             method,
-            body: body !== undefined && body !== null && body !== '' ? JSON.stringify(body) : null,
+            body: !hasBody ? null : isFormData ? body : JSON.stringify(body),
             headers,
             signal
         })
