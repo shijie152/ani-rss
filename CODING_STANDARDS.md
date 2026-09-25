@@ -26,3 +26,9 @@ Where the Go service reimplements Java behavior, the Java semantics are the sour
 ## Quality gate
 
 Every change must pass `./scripts/check.sh` (test, race, vet, gofmt, diff check) before review is called done.
+
+## Deterministic tests
+
+- Tests that exercise HTTP integrations use local fakes such as `httptest.Server`; fixtures provide all required upstream responses, including default metadata lookups.
+- Test HTTP clients have explicit timeouts. Every package with an HTTP boundary installs the loopback-only network guard so application-created clients also fail fast instead of reaching live services.
+- Live third-party smoke and Java/Go parity tests require both `-tags live` and `ANI_RSS_ALLOW_NETWORK_TESTS=1`; they are excluded from the ordinary test suite.

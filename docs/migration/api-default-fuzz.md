@@ -11,6 +11,16 @@
 - `go-backend/internal/backend/api_parity_test.go`
 - `go-backend/internal/backend/api_default_parity_test.go`
 
+这两个文件带有 `live` build tag，不会进入普通 `go test ./...`。运行前必须明确允许网络：
+
+```bash
+ANI_RSS_ALLOW_NETWORK_TESTS=1 \
+  go test -tags live ./go-backend/internal/backend
+```
+
+并设置 `ANI_RSS_JAVA_URL`、`ANI_RSS_GO_URL`；变更探针仍需额外设置
+`ANI_RSS_PARITY_INCLUDE_MUTATIONS=1`，且只能针对一次性服务实例。
+
 ## 默认行为矩阵
 
 `FuzzJavaGoAPIDefaults` 对 48 个安全 API 场景组合测试以下边界：

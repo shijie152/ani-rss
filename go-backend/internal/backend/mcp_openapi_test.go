@@ -110,7 +110,7 @@ func TestOpenAPIDescribesEveryGoRouteAndAuthContract(t *testing.T) {
 	app, server := newMCPTestServer(t, nil)
 	defer server.Close()
 	defer app.Close()
-	response, err := http.Get(server.URL + "/v3/api-docs")
+	response, err := backendTestHTTPClient.Get(server.URL + "/v3/api-docs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestOpenAPIDescribesEveryGoRouteAndAuthContract(t *testing.T) {
 	}
 	response.Body.Close()
 
-	uiResponse, err := http.Get(server.URL + "/swagger-ui/index.html")
+	uiResponse, err := backendTestHTTPClient.Get(server.URL + "/swagger-ui/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}

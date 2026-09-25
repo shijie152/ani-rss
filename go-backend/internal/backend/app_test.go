@@ -25,10 +25,6 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 )
 
-// backendTestHTTPClient keeps a broken handler or accidental remote request
-// from hanging a test until the package-wide go test timeout.
-var backendTestHTTPClient = &http.Client{Timeout: 10 * time.Second}
-
 func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	app, err := backend.New(backend.Options{ConfigDir: t.TempDir(), OwnershipDomains: []string{"runtime", "subscriptions"}})
 	if err != nil {
@@ -38,7 +34,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	h := gateway.New(gateway.Config{GoRoutes: app.Routes(), GoDomains: []string{"runtime", "subscriptions"}})
 	server := httptest.NewServer(h)
 	defer server.Close()
-	response, err := http.Get(server.URL + "/api/ping")
+	response, err := backendTestHTTPClient.Get(server.URL + "/api/ping")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +42,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("ping = %d", response.StatusCode)
 	}
-	response, err = http.Post(server.URL+"/api/config", "application/json", nil)
+	response, err = backendTestHTTPClient.Post(server.URL+"/api/config", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +52,7 @@ func TestRuntimeRoutesUseExistingResultContractAndProtectConfig(t *testing.T) {
 	if denied["code"] != float64(http.StatusForbidden) {
 		t.Fatalf("denied = %#v", denied)
 	}
-	response, err = http.Post(server.URL+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"21232f297a57a5a743894a0e4a801fc3"}`))
+	response, err = backendTestHTTPClient.Post(server.URL+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"21232f297a57a5a743894a0e4a801fc3"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1693,21 +1689,6 @@ func TestUploadKeepsJavaExtensionAndResultEnvelope(t *testing.T) {
 	}
 }
 
-func getWithHeader(t *testing.T, target, token, key, value string) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", token)
-	request.Header.Set(key, value)
-	response, err := backendTestHTTPClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
 func testCollectionTorrent() []byte {
 	info := testBDict(map[string][]byte{
 		"files": testBList(
@@ -1929,57 +1910,4 @@ func TestAppCloseStopsAndWaitsForSchedulers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scheduler did not finish after App.Close")
 	}
-}
-
-func login(t *testing.T, baseURL string) string {
-	t.Helper()
-	response := callJSON(t, baseURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})
-	if response["code"] != float64(http.StatusOK) {
-		t.Fatalf("login = %#v", response)
-	}
-	return response["data"].(string)
-}
-
-func callJSON(t *testing.T, target, token string, body any) map[string]any {
-	t.Helper()
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		request.Header.Set("Authorization", token)
-	}
-	response, err := backendTestHTTPClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	data, err = io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
-		t.Fatalf("%s: %v", string(data), err)
-	}
-	return payload
-}
-
-func get(t *testing.T, target, token string) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", token)
-	response, err := backendTestHTTPClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
 }
