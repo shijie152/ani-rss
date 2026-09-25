@@ -96,6 +96,7 @@ import {ElMessage} from "element-plus";
 import {Link, Picture, UploadFilled} from "@element-plus/icons-vue";
 import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {toApiFile} from "@/js/global.js";
+import {withQuery} from "@/js/requestUtils.js";
 import * as http from "@/js/http.js";
 import UploadView from "@/view/custom/UploadView.vue";
 
@@ -107,7 +108,7 @@ const saveLoading = ref(false)
 let sourceAni
 
 const previewUrl = computed(() => ani.value.cover
-    ? `${toApiFile(ani.value.cover)}&t=${time.value}`
+    ? withQuery(toApiFile(ani.value.cover), {t: time.value})
     : '')
 
 const refreshCover = () => {

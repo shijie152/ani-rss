@@ -101,6 +101,7 @@ import BangumiMeView from "./BangumiMeView.vue";
 import {onMounted, ref} from "vue";
 import {setConfig} from "@/js/http.js";
 import {getBaseUrl} from "@/js/global.js";
+import {withQuery} from "@/js/requestUtils.js";
 
 let bangumiMeRef = ref()
 
@@ -123,8 +124,11 @@ let start = () => {
   loading.value = true;
   setConfig(props.config)
       .then(async res => {
-        let redirect = window.encodeURI(props.config['bgmRedirectUri'])
-        let url = `https://bgm.tv/oauth/authorize?client_id=${props.config['bgmAppID']}&response_type=code&redirect_uri=${redirect}`
+        let url = withQuery('https://bgm.tv/oauth/authorize', {
+          client_id: props.config['bgmAppID'],
+          response_type: 'code',
+          redirect_uri: props.config['bgmRedirectUri']
+        })
         window.open(url)
         location.reload()
       })

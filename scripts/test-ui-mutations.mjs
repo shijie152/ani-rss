@@ -128,4 +128,23 @@ await kill(
   }
 )
 
-console.log('UI mutation tests passed: 7 mutants killed')
+await kill(
+  'daily-refresh-each-owner-group',
+  'src/js/dailyScheduler.js',
+  source => source.replace('const refreshes = [...listeners.values()]', 'const refreshes = [...listeners.values()].slice(0, 1)'),
+  async ({createDailyRefreshRegistry}) => {
+    let scheduled
+    const scheduler = createDailyRefreshRegistry({
+      now: () => new Date('2026-09-25T02:00:00Z'),
+      scheduleTimer: callback => { scheduled = callback; return callback },
+      cancelTimer: () => {}
+    })
+    let refreshes = 0
+    scheduler.register('mikan', () => { refreshes++ }, 'mikan')
+    scheduler.register('season', () => { refreshes++ }, 'season')
+    await scheduled()
+    assert.equal(refreshes, 2)
+  }
+)
+
+console.log('UI mutation tests passed: 8 mutants killed')

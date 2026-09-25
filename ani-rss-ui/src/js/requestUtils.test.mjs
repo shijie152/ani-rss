@@ -25,6 +25,15 @@ test('fuzz: query values round-trip through URLSearchParams', () => {
   }
 })
 
+test('absolute endpoint URLs preserve their origin and encode dynamic query values', () => {
+  const endpoint = withQuery('https://ani.example/api/embyWebHook', {'api-key': 'token&a#b?'})
+  const parsed = new URL(endpoint)
+
+  assert.equal(parsed.origin, 'https://ani.example')
+  assert.equal(parsed.pathname, '/api/embyWebHook')
+  assert.equal(parsed.searchParams.get('api-key'), 'token&a#b?')
+})
+
 test('request keys distinguish read bodies and stay stable for equivalent JSON', () => {
   assert.equal(requestKey('api/mikan', 'POST', {a: 1}), requestKey('api/mikan', 'POST', {a: 1}))
   assert.notEqual(requestKey('api/mikan', 'POST', {a: 1}), requestKey('api/mikan', 'POST', {a: 2}))

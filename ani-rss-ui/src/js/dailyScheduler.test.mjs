@@ -31,6 +31,34 @@ test('daily refresh registry keeps one timer and cancels it after the last owner
   assert.equal(timers[0].cancelled, true)
 })
 
+test('Mikan and season owners share one timer and each group refreshes once', async () => {
+  const timers = []
+  const scheduler = createDailyRefreshRegistry({
+    now: () => new Date('2026-09-25T02:00:00'),
+    scheduleTimer: (callback, delay) => {
+      const timer = {callback, delay, cancelled: false}
+      timers.push(timer)
+      return timer
+    },
+    cancelTimer: timer => { timer.cancelled = true }
+  })
+  let mikanRefreshes = 0
+  let seasonRefreshes = 0
+
+  const unregisterMikan = scheduler.register('mikan-view', () => { mikanRefreshes++ }, 'mikan')
+  const unregisterSeason = scheduler.register('season-page', () => { seasonRefreshes++ }, 'season')
+
+  assert.equal(timers.length, 1)
+  await timers[0].callback()
+  assert.equal(mikanRefreshes, 1)
+  assert.equal(seasonRefreshes, 1)
+  assert.equal(timers.length, 2)
+
+  unregisterMikan()
+  unregisterSeason()
+  assert.equal(timers[1].cancelled, true)
+})
+
 test('daily scheduler waits for an async refresh before scheduling again', async () => {
   const timers = []
   let release

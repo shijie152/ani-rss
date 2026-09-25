@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {readFile} from 'node:fs/promises'
+import {readdir, readFile} from 'node:fs/promises'
+import {extname, join} from 'node:path'
+import {fileURLToPath} from 'node:url'
 
 const read = file => readFile(new URL(file, import.meta.url), 'utf8')
 
@@ -20,4 +22,33 @@ test('lazy loading contracts remain enabled for the performance paths', async ()
   assert.match(season, /<LazyImage/)
   assert.match(subscription, /content-visibility: auto/)
   assert.match(logs, /content-visibility: auto/)
+})
+
+const sourceFiles = async directory => {
+  const entries = await readdir(directory, {withFileTypes: true})
+  const nested = await Promise.all(entries.map(entry => {
+    const path = join(directory, entry.name)
+    return entry.isDirectory()
+        ? sourceFiles(path)
+        : ['.js', '.vue'].includes(extname(entry.name)) ? [path] : []
+  }))
+  return nested.flat()
+}
+
+const findRawDynamicQueryParams = source =>
+    source.match(/[?&][A-Za-z0-9_-]+=[^'"`\s]*\$\{[^}]+\}/g) || []
+
+const executableSource = (file, source) => file.endsWith('.vue')
+    ? [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(match => match[1]).join('\n')
+    : source
+
+test('dynamic query parameters in UI source are not interpolated by hand', async () => {
+  const files = await sourceFiles(fileURLToPath(new URL('./', import.meta.url)))
+  const findings = (await Promise.all(files.map(async file => ({
+    file,
+    matches: findRawDynamicQueryParams(executableSource(file, await readFile(file, 'utf8')))
+  })))).flatMap(({file, matches}) => matches.map(match => `${file}: ${match}`))
+
+  assert.deepEqual(findRawDynamicQueryParams('window.open(`api/export?s=${token}`)'), ['?s=${token}'])
+  assert.deepEqual(findings, [])
 })
