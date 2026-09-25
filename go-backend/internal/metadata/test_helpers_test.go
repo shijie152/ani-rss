@@ -1,3 +1,5 @@
+//go:build !live
+
 package metadata
 
 import "github.com/shijie152/ani-rss/go-backend/internal/testutil"

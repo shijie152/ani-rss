@@ -38,9 +38,10 @@ ANI_RSS_ALLOW_NETWORK_TESTS=1 \
 在全新临时配置目录启动 Java 3.2.32 和最新 Go 二进制后：
 
 ```sh
+ANI_RSS_ALLOW_NETWORK_TESTS=1 \
 ANI_RSS_JAVA_URL=http://127.0.0.1:<JAVA_PORT> \
 ANI_RSS_GO_URL=http://127.0.0.1:<GO_PORT> \
-go test ./internal/backend -run '^TestJavaGoAPIParity$' -count=1
+go test -tags live ./internal/backend -run '^TestJavaGoAPIParity$' -count=1
 ```
 
 - 非变更确定性差分全部通过；变更探针默认跳过。

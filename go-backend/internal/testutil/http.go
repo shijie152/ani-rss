@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -37,13 +36,10 @@ func InstallLoopbackNetworkGuard() {
 	http.DefaultTransport = guarded
 }
 
-// InstallTestNetworkGuard installs the loopback-only guard unless the caller
-// explicitly opted into live network tests. Keeping this decision in one
-// helper makes every test package use the same opt-in contract.
+// InstallTestNetworkGuard installs the loopback-only guard for a deterministic
+// test package. Live tests are separated with the live build tag, so an
+// environment variable can never silently disable ordinary test isolation.
 func InstallTestNetworkGuard() {
-	if os.Getenv("ANI_RSS_ALLOW_NETWORK_TESTS") == "1" {
-		return
-	}
 	InstallLoopbackNetworkGuard()
 }
 

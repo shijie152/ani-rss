@@ -14,10 +14,6 @@ import (
 
 var backendTestHTTPClient = testutil.LocalHTTPClient(10 * time.Second)
 
-func init() {
-	testutil.InstallTestNetworkGuard()
-}
-
 func login(t *testing.T, baseURL string) string {
 	t.Helper()
 	response := callJSON(t, baseURL+"/api/login", "", model.Login{Username: "admin", Password: "21232f297a57a5a743894a0e4a801fc3"})
