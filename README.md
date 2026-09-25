@@ -26,6 +26,24 @@
 ![image](https://github.com/wushuo894/ani-rss-docs/raw/main/docs/image/screenshot/screenshot.webp#gh-light-mode-only)
 ![image](https://github.com/wushuo894/ani-rss-docs/raw/main/docs/image/screenshot/screenshot-dark.webp#gh-dark-mode-only)
 
+## Docker 部署（Go 版）
+
+本仓库为 Go 重写版，镜像发布在 GHCR：
+
+```bash
+docker run -d --name ani-rss -p 7789:7789 -v ./config:/config -e PUID=1000 -e PGID=1000 -e TZ=Asia/Shanghai ghcr.io/shijie152/ani-rss:latest
+```
+
+或使用 compose（仓库内已提供 [docker/docker-compose.yml](docker/docker-compose.yml)）：
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+沿用旧 Java 版的 `/config` 目录即可，首次启动会自动把 `config.json` / `ani.json` / `*.v2.json` 导入 SQLite，订阅与配置无缝迁移。
+
+支持平台：`linux/amd64`、`linux/arm64`、`linux/arm/v7`。
+
 ## 其他
 
 [关于不接受“纯 AI 生成”的 Pull Request 的说明](https://github.com/wushuo894/ani-rss/discussions/685)

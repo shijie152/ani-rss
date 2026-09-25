@@ -1,0 +1,21 @@
+services:
+  ani-rss:
+    image: ghcr.io/shijie152/ani-rss:latest
+    container_name: ani-rss
+    restart: unless-stopped
+    ports:
+      - "7789:7789"
+    volumes:
+      # 配置/数据库目录。沿用旧 Java 版的 /config 目录即可，
+      # 首次启动会自动把 config.json / ani.json / *.v2.json 导入 SQLite。
+      - ./config:/config
+      # 下载完成后需要读取/重命名媒体文件的话，把媒体库挂进来并保持路径与 qBittorrent 一致：
+      # - /path/to/downloads:/downloads
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      TZ: Asia/Shanghai
+      # SERVER_PORT: "7789"   # 改容器内监听端口才需要
+      # SWAGGER_ENABLED: "false"
+      # MCP_ENABLED: "false"
