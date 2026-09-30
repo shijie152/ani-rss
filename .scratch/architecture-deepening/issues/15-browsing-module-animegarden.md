@@ -6,7 +6,7 @@
 
 **Status:** done
 
-- [x] AnimeGarden 页搜索→分组→批量添加→复制全流程可用（新增 `tests/browser/source-browsing.spec.mjs`：三个源站页在真实浏览器里各打开一次）
+- [x] AnimeGarden 页的分组→批量添加→复制可用（适配器行为测试覆盖其 subjectId/subgroupLabel/bgmUrl；浏览器冒烟只验证它能打开——它的列表需要 `show(bgmUrl)` 传参，从添加订阅流程进入时列表为空，无法在该路径上驱动到批量添加）
 - [x] 三个源站页不再各自实现同一交互（三处 `execCommand` 拷贝与三份分组/批量添加逻辑全部消失）
 - [x] 新增第四个源站只需写一个适配器（`{type, subjectId, subgroupLabel, bgmUrl?}`）
 

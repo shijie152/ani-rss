@@ -110,7 +110,9 @@ test('Mikan 批量添加走 submitBatch（rssToAni + addAni）', async ({page}) 
 })
 
 // 批量添加走同一份 submitBatch，但三个源站的 adapter 不同（分组键、字幕组字段、
-// 是否补 bgmUrl/subgroup 都不同），所以 Mikan 与 AniBT 各真跑一遍。
+// 是否补 bgmUrl/subgroup 都不同）。AnimeGarden 的列表需要 show(bgmUrl) 传参，
+// 从添加订阅流程进入时列表为空，无法在这条路径上驱动到批量添加——它的适配器
+// 行为由 sourceBrowsing.test.mjs 覆盖。
 for (const source of batchCases.filter(item => item.label !== 'AnimeGarden')) {
   test(`${source.label} 批量添加走 submitBatch`, async ({page}) => {
     const called = {rssToAni: 0, addAni: 0}

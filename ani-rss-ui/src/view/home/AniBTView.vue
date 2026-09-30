@@ -158,7 +158,14 @@ import LazyImage from '@/view/custom/LazyImage.vue';
 import * as http from "@/js/http.js";
 import {formatDate, fromNow} from "@/js/format.js";
 import {proxyImage} from "@/js/global.js";
-import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+import {
+  buildAddDraft,
+  buildRegexList,
+  copyText,
+  createSubgroupLoader,
+  sourceAdapters,
+  submitBatch
+} from '@/js/sourceBrowsing.js';
 
 const aniBTAdapter = sourceAdapters['ani-bt']
 
@@ -220,10 +227,14 @@ let selectName = ref('')
 let groups = ref({})
 
 // 展开字幕组：缓存与 loading 由共享 loader 管，视图只给端点调用。
+const loadingGroups = new Set()
 const subgroupLoader = createSubgroupLoader({
   load: url => http.aniBTGroup(url).then(res => res.data),
-  onLoading: value => {
-    groupLoading.value = value
+  // 并发展开多个字幕组时按 key 计数：一个完成不能把仍在加载的 spinner 关掉。
+  onLoading: (value, key) => {
+    if (value) loadingGroups.add(key)
+    else loadingGroups.delete(key)
+    groupLoading.value = loadingGroups.size > 0
   }
 })
 
@@ -247,15 +258,8 @@ let addAni = ref({
 let regexList = ref([])
 
 let callback = v => {
-  let {bgmId, rss, name} = v
-  regexList.value = JSON.parse(JSON.stringify(v.groupRegex.regexList))
-
-  addAni.value.bgmUrl = `https://bgm.tv/subject/${bgmId}`
-  addAni.value.url = rss
-  addAni.value.subgroup = name
-  addAni.value.match = '[]'
-
-  regexList.value.push([])
+  regexList.value = buildRegexList(v)
+  addAni.value = {...addAni.value, ...buildAddDraft(v, aniBTAdapter)}
   matchDialogVisible.value = true
 }
 

@@ -50,12 +50,11 @@ type Service struct {
 	listener   net.Listener
 	address    string
 	executable func() (string, []string, error)
-	ready      chan struct{}
 }
 
 // New assembles the backend and gateway. No port is bound until Run.
 func New(options Options) (*Service, error) {
-	service := &Service{options: options, ready: make(chan struct{})}
+	service := &Service{options: options}
 	service.executable = options.ResolveExecutable
 	if service.executable == nil {
 		service.executable = func() (string, []string, error) {
@@ -110,7 +109,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.listener = listener
 	s.address = listener.Addr().String()
-	close(s.ready)
 	if s.options.OnListening != nil {
 		s.options.OnListening(s.address)
 	}

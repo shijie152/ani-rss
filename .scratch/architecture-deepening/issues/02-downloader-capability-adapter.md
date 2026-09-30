@@ -6,7 +6,7 @@
 
 **Status:** done
 
-- [x] 路由层不再出现针对下载器的运行时能力断言（`downloader.Capabilities(adapter)` 提供 seam；返回 adapter 原生 `TorrentFile`，不再有只做字段搬运的中间类型）
+- [x] 路由层不再出现针对下载器的运行时能力断言（`downloader.Capabilities(adapter)` 提供 seam，返回 adapter 原生 `TorrentFile`）。`completion` 与 `downloader` 是两个 module、互不依赖，跨 seam 时仍需一次显式逐字段转换——那是模块边界的代价，不是冗余搬运层。
 - [x] 支持/不支持某能力的下载器，完成管线走对应分支（downloader 侧两条分支都有测试）
 - [x] 现有完成管线测试与 API parity 测试全绿（`bash scripts/check.sh` 通过）
 

@@ -68,6 +68,26 @@ const buildSubscription = (items, adapter) => {
 
 // resolve 把订阅草稿补成完整番剧（对应 rssToAni），add 落库（对应 addAni），
 // onProgress 汇报已完成条数，供批量添加弹窗显示进度。
+// 点「添加」时的草稿：三个源站页各写一份，只差字段名（label/name）与 bgmUrl 推导，
+// 那些差异本就由 adapter 表达。视图只提供空的 addAni 与打开弹窗的回调。
+export const buildAddDraft = (group, adapter) => {
+  const draft = {
+    url: group.rss,
+    match: '[]'
+  }
+  const bgmUrl = adapter.bgmUrl
+      ? adapter.bgmUrl(adapter.subjectId(group))
+      : group.bgmUrl
+  if (bgmUrl) draft.bgmUrl = bgmUrl
+  const subgroup = adapter.subgroupLabel(group)
+  if (subgroup) draft.subgroup = subgroup
+  return draft
+}
+
+// 匹配弹窗的候选项：分组自带的 regexList 加一条「全部」。
+export const buildRegexList = group =>
+  [...(group?.groupRegex?.regexList ?? []), []]
+
 // 展开字幕组：三个源站页各写一份，只差调用的端点。收进这里，视图只给 load 与回调。
 export const createSubgroupLoader = ({load, onLoading} = {}) => {
   const groups = new Map()

@@ -8,7 +8,7 @@
 
 - [x] 只有 owned domain 的定时任务被启动（`RunSchedulers(ctx)` 仍由 app 按 OwnedDomains 决定，bootstrap 只传 options）
 - [x] 关闭顺序由该 module 决定，不散落在调用方（gateway → scheduler → backend，全在 `Run` 里）
-- [x] `main` 只负责读取选项并调用它（134 → 104 行，不再自己拼 server/scheduler/exec）
+- [x] `main` 只负责读取选项并调用它（134 → 120 行，不再自己拼 server/scheduler/exec；余下是 flag 解析、信号与托盘编排）
 - [x] 现有启动/调度相关测试全绿（新增 `bootstrap_test.go` 两条 + `check.sh`）
 
 ## Test plan

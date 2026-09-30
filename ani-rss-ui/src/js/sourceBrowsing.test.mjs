@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {readFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from './sourceBrowsing.js'
+import {buildAddDraft, buildRegexList, copyText, createSubgroupLoader, sourceAdapters, submitBatch} from './sourceBrowsing.js'
 
 // 直接测视图用的那一份 adapter，而不是在测试里另抄一份。
 const mikanAdapter = sourceAdapters.mikan
@@ -107,6 +107,28 @@ test('every source has an adapter defined in the module', () => {
 // Mikan 的批量添加草稿刻意不带 bgmUrl/subgroup：后端只有两者都为空时才去
 // 解析 Mikan 详情页；带上会静默跳过那段解析（见 source/mikan.go 的注释）。
 // 字幕组加载器：三个源站页共用，重复展开同一个字幕组不能再发请求。
+// 「添加」草稿与匹配候选项：三个源站页各写一份，差异只在字段名与 bgmUrl 推导，
+// 那些差异由 adapter 表达（与批量添加的规则不同：这里 Mikan 也带 bgmUrl/subgroup）。
+test('buildAddDraft follows the adapter field names', () => {
+  const mikanRss = 'https://mikan.example/RSS/Bangumi?bangumiId=1'
+  const mikan = buildAddDraft({rss: mikanRss, bgmUrl: 'https://bgm.tv/subject/1', label: '字幕组A'}, sourceAdapters.mikan)
+  assert.deepEqual(mikan, {url: mikanRss, match: '[]', bgmUrl: 'https://bgm.tv/subject/1', subgroup: '字幕组A'})
+
+  const anibtRss = 'https://anibt.example/rss?bgmId=7'
+  const anibt = buildAddDraft({rss: anibtRss, bgmId: 7, name: '字幕组B'}, sourceAdapters['ani-bt'])
+  assert.deepEqual(anibt, {url: anibtRss, match: '[]', bgmUrl: 'https://bgm.tv/subject/7', subgroup: '字幕组B'})
+})
+
+test('buildRegexList appends the catch-all option', () => {
+  const list = buildRegexList({groupRegex: {regexList: [[{label: '1080p', regex: '1080p'}]]}})
+  assert.equal(list.length, 2)
+  assert.deepEqual(list[1], [])
+  // 不改动传入的原始数组。
+  const source = {groupRegex: {regexList: [[{label: 'x'}]]}}
+  buildRegexList(source)
+  assert.equal(source.groupRegex.regexList.length, 1)
+})
+
 test('subgroup loader caches results and reports loading state', async () => {
   const states = []
   let calls = 0
@@ -122,6 +144,26 @@ test('subgroup loader caches results and reports loading state', async () => {
   assert.deepEqual(first, second)
   assert.equal(loader.has('https://mikan.example/g1'), true)
   assert.deepEqual(states, [true, false])
+})
+
+// onLoading 带 key：视图据此按 key 计数，一个字幕组完成不能把另一个的 spinner 关掉。
+test('subgroup loader reports loading per key', async () => {
+  const events = []
+  const releases = {}
+  const loader = createSubgroupLoader({
+    load: key => new Promise(resolve => { releases[key] = resolve }),
+    onLoading: (value, key) => events.push([key, value])
+  })
+  const a = loader.load('A')
+  const b = loader.load('B')
+  // load 在微任务里才被调用，先让出一次事件循环让 releases 就位。
+  await Promise.resolve()
+  releases.A({ok: 'A'})
+  await a
+  releases.B({ok: 'B'})
+  await b
+
+  assert.deepEqual(events, [['A', true], ['B', true], ['A', false], ['B', false]])
 })
 
 test('subgroup loader coalesces concurrent loads of the same key', async () => {

@@ -219,6 +219,23 @@ type components struct {
 	app *App
 }
 
+// HTTPClient assembles an HTTP client from the given configuration snapshot.
+// Callers needing a client from a snapshot other than the app's current config
+// (proxy test, RSS conversion) go through here instead of calling
+// httpclient.New themselves.
+func (c *components) HTTPClient(cfg model.Config) (*http.Client, error) {
+	return httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+}
+
+// DownloaderAdapter assembles the downloader adapter for the given snapshot.
+func (c *components) DownloaderAdapter(cfg model.Config) (downloader.Adapter, error) {
+	client, err := c.HTTPClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return downloader.New(cfg, client)
+}
+
 // Coordinator assembles the RSS coordinator for the current configuration.
 func (c *components) Coordinator() (*rss.Coordinator, error) {
 	app := c.app
@@ -749,7 +766,7 @@ func (a *App) testProxy(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "代理配置格式异常: "+err.Error())
 		return
 	}
-	client, err := httpclient.New(input, time.Duration(appconfig.Int(input, "rssTimeout"))*time.Second)
+	client, err := a.Components().HTTPClient(input)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -1238,7 +1255,7 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) rssConversionResources(ctx context.Context, feedURL string, item *model.Ani) ([]model.Resource, error) {
 	cfg := a.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	client, err := a.Components().HTTPClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1619,13 +1636,9 @@ func (a *App) downloadLoginTest(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	adapter, err := a.Components().DownloaderAdapter(cfg)
 	if err == nil {
-		var adapter downloader.Adapter
-		adapter, err = downloader.New(cfg, client)
-		if err == nil {
-			err = adapter.Login(r.Context())
-		}
+		err = adapter.Login(r.Context())
 	}
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, "登录失败")
@@ -1636,11 +1649,7 @@ func (a *App) downloadLoginTest(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) collectionService() (*collection.Service, error) {
 	cfg := a.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	adapter, err := downloader.New(cfg, client)
+	adapter, err := a.Components().DownloaderAdapter(cfg)
 	if err != nil {
 		return nil, err
 	}
