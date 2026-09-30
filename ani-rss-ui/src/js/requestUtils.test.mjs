@@ -37,6 +37,8 @@ test('absolute endpoint URLs preserve their origin and encode dynamic query valu
 test('request keys distinguish read bodies and stay stable for equivalent JSON', () => {
   assert.equal(requestKey('api/mikan', 'POST', {a: 1}), requestKey('api/mikan', 'POST', {a: 1}))
   assert.notEqual(requestKey('api/mikan', 'POST', {a: 1}), requestKey('api/mikan', 'POST', {a: 2}))
+  assert.equal(requestKey(withQuery('api/mikan', {text: 'x'}), 'POST'), requestKey('api/mikan?text=x', 'POST'))
+  assert.notEqual(requestKey(withQuery('api/mikan', {text: 'x'}), 'POST'), requestKey(withQuery('api/mikan', {text: 'y'}), 'POST'))
 })
 
 test('dedupe only applies to safe reads unless explicitly overridden', () => {
@@ -44,4 +46,10 @@ test('dedupe only applies to safe reads unless explicitly overridden', () => {
   assert.equal(shouldDedupe('api/addAni', 'POST'), false)
   assert.equal(shouldDedupe('api/addAni', 'POST', {dedupe: true}), true)
   assert.equal(shouldDedupe('api/mikan', 'POST', {dedupe: false}), false)
+})
+
+test('dedupe recognizes read-only endpoints built by withQuery', () => {
+  assert.equal(shouldDedupe(withQuery('api/mikan', {text: 'x'}), 'POST'), true)
+  assert.equal(shouldDedupe(withQuery('api/addAni', {move: true}), 'POST'), false)
+  assert.equal(shouldDedupe('/api/listAni', 'POST'), true)
 })

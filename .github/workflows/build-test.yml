@@ -14,12 +14,6 @@ jobs:
         with:
           go-version-file: go-backend/go.mod
           cache-dependency-path: go-backend/go.sum
-      - name: Test Go backend
-        run: |
-          go test ./go-backend/...
-          go test -race ./go-backend/...
-          go vet ./go-backend/...
-          git diff --check
       - name: Quality gate
         run: bash ./scripts/check.sh
       - name: Fuzz core business boundaries

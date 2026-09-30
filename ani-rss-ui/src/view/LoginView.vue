@@ -112,6 +112,7 @@ let test = () => {
         }
         authorization.value = ''
       })
+      .catch(() => {})
 }
 
 onMounted(() => {

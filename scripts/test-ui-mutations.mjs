@@ -17,11 +17,13 @@ const loadMutant = async (relativePath, label, mutate) => {
   return import(`${pathToFileURL(target).href}?mutation=${Date.now()}-${Math.random()}`)
 }
 
+let killed = 0
 const kill = async (label, relativePath, mutate, assertion) => {
   const module = await loadMutant(relativePath, label, mutate)
   try {
     await assertion(module)
   } catch (_) {
+    killed++
     console.log(`KILLED ${label}`)
     return
   }
@@ -42,8 +44,8 @@ await kill(
   'request-dedupe-scope',
   'src/js/requestUtils.js',
   source => source.replace(
-    "return method === 'POST' && readOnlyPostPaths.has(url.split('?')[0])",
-    "return method === 'POST' || readOnlyPostPaths.has(url.split('?')[0])"
+    'method === \'POST\' && readOnlyPostPaths',
+    'method === \'POST\' || readOnlyPostPaths'
   ),
   ({shouldDedupe}) => assert.equal(shouldDedupe('api/addAni', 'POST'), false)
 )
@@ -51,10 +53,20 @@ await kill(
 await kill(
   'request-key-body',
   'src/js/requestUtils.js',
-  source => source.replace('return `${method}:${url}:${serialized}`', 'return `${method}:${url}`'),
+  source => source.replace(':${serialized}`', '`'),
   ({requestKey}) => assert.notEqual(
     requestKey('api/mikan', 'POST', {season: '2026 春'}),
     requestKey('api/mikan', 'POST', {season: '2026 夏'})
+  )
+)
+
+await kill(
+  'request-key-keeps-query',
+  'src/js/requestUtils.js',
+  source => source.replace('${url.replace(/^\\/+/, \'\')}', '${endpointPath(url)}'),
+  ({requestKey}) => assert.notEqual(
+    requestKey('api/mikan?text=春', 'POST'),
+    requestKey('api/mikan?text=夏', 'POST')
   )
 )
 
@@ -147,4 +159,4 @@ await kill(
   }
 )
 
-console.log('UI mutation tests passed: 8 mutants killed')
+console.log(`UI mutation tests passed: ${killed} mutants killed`)

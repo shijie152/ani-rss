@@ -23,11 +23,15 @@ export const requestKey = (url, method, body) => {
       serialized = String(body)
     }
   }
-  return `${method}:${url}:${serialized}`
+  return `${method}:${url.replace(/^\/+/, '')}:${serialized}`
 }
+
+// withQuery 产出带前导斜杠的路径（/api/mikan），调用方也可能传裸路径（api/mikan）：
+// 归一化只去掉前导斜杠，查询串必须保留（Mikan 搜索词的 text 就在 query 里，丢了会串号）
+const endpointPath = url => url.split('?')[0].replace(/^\/+/, '')
 
 export const shouldDedupe = (url, method, options = {}) => {
   if (options.dedupe !== undefined) return options.dedupe
   if (method === 'GET') return true
-  return method === 'POST' && readOnlyPostPaths.has(url.split('?')[0])
+  return method === 'POST' && readOnlyPostPaths.has(endpointPath(url))
 }

@@ -84,7 +84,7 @@ const requestImpl = async (url, method, body, options) => {
             code: responseCode,
             status: response.status
         })
-        ElMessage.error(error.message)
+        if (!options.silent) ElMessage.error(error.message)
         if (responseCode === 403) {
             authorization.value = ''
             window.setTimeout(() => location.reload(), 1000)

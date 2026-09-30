@@ -317,7 +317,7 @@ export let login = (user) => {
  * 测试IP白名单
  * @returns {Promise<Response>}
  */
-export let testIpWhitelist = () => api.post('api/testIpWhitelist')
+export let testIpWhitelist = () => api.post('api/testIpWhitelist', undefined, {silent: true})
 
 /**
  * 获取视频列表
