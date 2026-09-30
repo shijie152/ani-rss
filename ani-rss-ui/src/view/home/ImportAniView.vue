@@ -34,7 +34,7 @@
             </el-text>
           </div>
         </div>
-        <UploadView url="api/uploadAndRead"
+        <UploadView :url="uploadAndReadUrl"
                     :extensions="['json']"
                     :callback="uploadCallback">
           <el-button bg icon="Upload">选择并上传文件</el-button>
@@ -96,8 +96,10 @@ import {Document, Setting} from "@element-plus/icons-vue";
 import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {ElMessage} from "element-plus";
 import {importAni} from "@/js/http.js";
+import {callbackEndpoints} from "@/js/endpoints.js";
 import UploadView from "@/view/custom/UploadView.vue";
 
+const uploadAndReadUrl = callbackEndpoints.uploadAndRead.path
 let importDataLoading = ref(false);
 
 let startImport = () => {

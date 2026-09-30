@@ -140,6 +140,9 @@ import {DocumentCopy} from "@element-plus/icons-vue";
 import LazyImage from '@/view/custom/LazyImage.vue';
 import * as http from "@/js/http.js";
 import {proxyImage} from "@/js/global.js";
+import {copyText, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+
+const animeGardenAdapter = sourceAdapters['anime-garden']
 import {fromNow} from "@/js/format.js";
 
 // 批量添加订阅
@@ -251,43 +254,17 @@ let batchAddition = async () => {
 
   try {
     ElMessage.success("添加中....")
-    let map = rssList.value.reduce((acc, item) => {
-      let parsedItem = JSON.parse(item);
-      let bgmId = parsedItem['bgmId'];
-      if (!acc[bgmId]) {
-        acc[bgmId] = [];
-      }
-      acc[bgmId].push(parsedItem);
-      return acc;
-    }, {})
-    for (let item of Object.values(map)) {
-      let ani = {
-        "url": item[0]['rss'],
-        "season": 1,
-        "offset": 0,
-        "title": "",
-        "exclude": [],
-        "totalEpisodeNumber": 0,
-        "match": [],
-        "type": "anime-garden",
-        "bgmUrl": `https://bgm.tv/subject/${item[0].bgmId}`,
-        "subgroup": item[0].name
-      }
-
-      ani = (await http.rssToAni(ani)).data
-      if (item.length > 1) {
-        ani.standbyRssList = item.slice(1)
-            .map(o => {
-              return {
-                label: o.name,
-                url: o['rss'],
-                offset: 0
-              }
-            })
-      }
-      batchAdditionNum.value += item.length
-      await http.addAni(ani)
-    }
+    await submitBatch(
+        rssList.value.map(item => JSON.parse(item)),
+        animeGardenAdapter,
+        {
+          resolve: async draft => (await http.rssToAni(draft)).data,
+          add: ani => http.addAni(ani),
+          onProgress: done => {
+            batchAdditionNum.value = done
+          }
+        }
+    )
     ElMessage.success("添加成功")
 
     setTimeout(() => {
@@ -300,13 +277,8 @@ let batchAddition = async () => {
   }
 }
 
-let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v;
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
+let copy = async (v) => {
+  await copyText(v)
   ElMessage.success('已复制')
 }
 

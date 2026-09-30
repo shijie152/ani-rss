@@ -76,7 +76,8 @@ import {ref} from "vue";
 import * as http from "@/js/http.js";
 import {Github} from "@vicons/fa";
 import {getBaseUrl} from "@/js/global.js";
-import {withQuery} from "@/js/requestUtils.js";
+import {apiKeyUrl} from "@/js/authenticatedUrl.js";
+import {copyText} from '@/js/sourceBrowsing.js';
 
 let openUrl = (url) => window.open(url)
 
@@ -93,22 +94,17 @@ let clearCache = () => {
 }
 
 let copyEmbyApi = () => {
-  let url = withQuery(`${getBaseUrl()}api/embyWebHook`, {'api-key': props.config.apiKey});
+  let url = apiKeyUrl('api/embyWebHook', {key: props.config.apiKey}, {base: getBaseUrl()});
   copy(url)
 }
 
 let copyIcs = () => {
-  let url = withQuery(`${getBaseUrl()}api/calendar.ics`, {'api-key': props.config.apiKey});
+  let url = apiKeyUrl('api/calendar.ics', {key: props.config.apiKey}, {base: getBaseUrl()});
   copy(url)
 }
 
-let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
+let copy = async (v) => {
+  await copyText(v)
   ElMessage.success('已复制')
 }
 

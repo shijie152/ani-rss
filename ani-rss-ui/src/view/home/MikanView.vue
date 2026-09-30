@@ -161,6 +161,9 @@ import {
   writeSeasonCache
 } from "./seasonCatalogCache.js";
 import {registerMikanCacheScheduler} from './mikanCacheScheduler.js';
+import {copyText, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+
+const mikanAdapter = sourceAdapters.mikan
 
 // 批量添加订阅
 let rssList = ref([]);
@@ -405,47 +408,20 @@ let batchAdditionDialogVisible = ref(false)
 let batchAddition = async () => {
   batchAdditionNum.value = 0
   batchAdditionDialogVisible.value = true
-  let getBangumiId = (url) => {
-    const parsedUrl = new URL(url);
-    return parsedUrl.searchParams.get('bangumiId');
-  };
 
   try {
     ElMessage.success("添加中....")
-    let map = rssList.value.reduce((acc, item) => {
-      let bangumiId = getBangumiId(JSON.parse(item)['rss']);
-      if (!acc[bangumiId]) {
-        acc[bangumiId] = [];
-      }
-      acc[bangumiId].push(JSON.parse(item));
-      return acc;
-    }, {})
-    for (let item of Object.values(map)) {
-      let ani = {
-        "url": item[0]['rss'],
-        "season": 1,
-        "offset": 0,
-        "title": "",
-        "exclude": [],
-        "totalEpisodeNumber": 0,
-        "match": [],
-        "type": "mikan"
-      }
-
-      ani = (await http.rssToAni(ani)).data
-      if (item.length > 1) {
-        ani.standbyRssList = item.slice(1)
-            .map(o => {
-              return {
-                label: o.label,
-                url: o['rss'],
-                offset: 0
-              }
-            })
-      }
-      batchAdditionNum.value += item.length
-      await http.addAni(ani)
-    }
+    await submitBatch(
+        rssList.value.map(item => JSON.parse(item)),
+        mikanAdapter,
+        {
+          resolve: async draft => (await http.rssToAni(draft)).data,
+          add: ani => http.addAni(ani),
+          onProgress: done => {
+            batchAdditionNum.value = done
+          }
+        }
+    )
     ElMessage.success("添加成功")
 
     setTimeout(() => {
@@ -458,13 +434,8 @@ let batchAddition = async () => {
   }
 }
 
-let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v;
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
+let copy = async (v) => {
+  await copyText(v)
   ElMessage.success('已复制')
 }
 

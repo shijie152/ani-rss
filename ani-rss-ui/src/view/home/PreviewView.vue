@@ -122,6 +122,7 @@ import {computed, ref} from "vue";
 import {ElMessage} from "element-plus";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import * as http from "@/js/http.js";
+import {copyText} from '@/js/sourceBrowsing.js';
 
 const props = defineProps({
   ani: {
@@ -172,29 +173,8 @@ const omitAlertTitle = computed(() => {
   return omitList.length ? `缺少集数: ${omitList.slice(0, 10).join('、')}` : ''
 })
 
-const fallbackCopy = value => {
-  const input = document.createElement('input');
-  input.value = value
-  document.body.appendChild(input);
-  input.select();
-  const copied = document.execCommand('copy');
-  document.body.removeChild(input);
-  return copied
-}
-
 const copyTorrent = async value => {
-  let copied = false
-  try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error('Clipboard API is unavailable')
-    }
-    await navigator.clipboard.writeText(value)
-    copied = true
-  } catch {
-    copied = fallbackCopy(value)
-  }
-
-  if (copied) {
+  if (await copyText(value)) {
     ElMessage.success('已复制')
   } else {
     ElMessage.error('复制失败')

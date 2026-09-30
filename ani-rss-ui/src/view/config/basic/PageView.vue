@@ -100,7 +100,7 @@
     </el-button>
   </SettingsItem>
   <SettingsItem label="WebUI">
-    <UploadView url="api/webui/upload" :callback="callback" :extensions="['zip']">
+    <UploadView :url="webuiUploadUrl" :callback="callback" :extensions="['zip']">
       <el-button bg icon="Upload">选择文件并上传</el-button>
     </UploadView>
   </SettingsItem>
@@ -124,8 +124,10 @@ import {
 } from "@/js/global.js";
 import {ElMessage} from "element-plus";
 import UploadView from "@/view/custom/UploadView.vue";
+import {callbackEndpoints} from "@/js/endpoints.js";
 import SettingsItem from "@/view/custom/SettingsItem.vue";
 
+const webuiUploadUrl = callbackEndpoints.webuiUpload.path
 let predefineColors = ref([
   '#409eff', '#109D58', '#BF3545', '#CB7574',
   '#9AAEC7', '#2EC5B6', '#1C1C1C', '#F7B1A9',

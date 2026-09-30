@@ -2,17 +2,20 @@
   <div class="content flex">
     <el-button bg @click="exportConfig" icon="Upload">导出设置</el-button>
     <el-button bg @click="importConfig" icon="Download">导入设置</el-button>
-    <UploadView ref="uploadRef" url="api/importConfig" :extensions="['zip']" :callback="callback"/>
+    <UploadView ref="uploadRef" :url="importConfigUrl" :extensions="['zip']" :callback="callback"/>
   </div>
 </template>
 <script setup>
 import {authorization} from "@/js/global.js";
+import {sessionUrl} from "@/js/authenticatedUrl.js";
+import {callbackEndpoints} from "@/js/endpoints.js";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {markRaw, ref} from "vue";
 import {WarnTriangleFilled} from "@element-plus/icons-vue";
 import UploadView from "@/view/custom/UploadView.vue";
 import {withQuery} from "@/js/requestUtils.js";
 
+const importConfigUrl = callbackEndpoints.importConfig.path
 let uploadRef = ref()
 
 let importConfig = () => {
@@ -50,7 +53,7 @@ let callback = res => {
 
 let exportConfig = () => {
   let element = document.createElement('a');
-  element.href = withQuery('api/exportConfig', {s: authorization.value})
+  element.href = sessionUrl('api/exportConfig', {}, {token: authorization.value})
 
   document.body.appendChild(element);
 

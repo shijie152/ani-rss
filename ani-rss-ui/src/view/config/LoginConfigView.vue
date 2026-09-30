@@ -68,6 +68,7 @@
 
 <script setup>
 import SettingsItem from "@/view/custom/SettingsItem.vue";
+import {copyText} from '@/js/sourceBrowsing.js';
 import {ElMessage, ElText} from "element-plus";
 import {Key, User} from "@element-plus/icons-vue";
 
@@ -85,13 +86,8 @@ let createApiKey = () => {
   props.config.apiKey = generateRandomString(64);
 }
 
-let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
+let copy = async (v) => {
+  await copyText(v)
   ElMessage.success('已复制')
 }
 

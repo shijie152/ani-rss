@@ -168,9 +168,12 @@ import {
   preserveSeasonOptions,
   readSeasonCache,
   resolveSeasonRequest,
+  seasonCacheKey,
   withSeasonOptions,
   writeSeasonCacheWithCurrentAlias
 } from "./seasonCatalogCache.js";
+import {createCatalogRequest} from '@/js/catalogRequest.js';
+import {copyText} from '@/js/sourceBrowsing.js';
 import {onSubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {registerDailyRefreshScheduler} from '@/js/dailyScheduler.js';
 
@@ -199,7 +202,6 @@ const cacheUpdatedAt = ref(0)
 const loadError = ref('')
 
 const SEASON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
-let loadSequence = 0
 
 const sourceLabel = computed(() => source.value === 'mikan' ? 'Mikan' : 'AniBT')
 const seasonOptions = computed(() => source.value === 'mikan'
@@ -215,7 +217,10 @@ const cacheTimeLabel = computed(() => cacheUpdatedAt.value
     ? new Date(cacheUpdatedAt.value).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
     : '')
 
-const readCache = (sourceName, season) => readSeasonCache(sourceName, season)
+// 决策（命中/过期/失败回退/旧响应丢弃）由 catalogRequest module 掌握；
+// 缓存的版本号与季节别名形状仍由 seasonCatalogCache 负责。
+const catalogRequest = createCatalogRequest({ttl: SEASON_CACHE_TTL})
+
 const writeCache = (sourceName, season, data) => {
   const currentSeason = sourceName === 'mikan' ? mikanCurrentSeason.value : aniBTCurrentSeason.value
   const cacheData = withSeasonOptions(
@@ -233,6 +238,7 @@ const writeCache = (sourceName, season, data) => {
   )
   if (savedAt) cacheUpdatedAt.value = savedAt
 }
+
 
 const setWeeks = value => {
   weeks.value = value || []
@@ -255,20 +261,14 @@ const rememberMikanCurrentSeason = data => {
   if (selected?.seasonLabel) mikanCurrentSeason.value = selected.seasonLabel
 }
 
-const loadMikan = async (force = false, sequence = loadSequence) => {
+const loadMikan = async (force = false) => {
   const requestedSeason = resolveSeasonRequest(mikanSeason.value, mikanFollowsCurrent.value)
-  const cached = readCache('mikan', requestedSeason)
-  if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
-    if (sequence !== loadSequence) return
+  const applyCached = cached => {
     if (requestedSeason === 'current') rememberMikanCurrentSeason(cached.data)
     applyMikanData(cached.data)
     if (requestedSeason === 'current' && !mikanCurrentSeason.value) {
       mikanCurrentSeason.value = mikanSeason.value
     }
-    cacheUpdatedAt.value = cached.savedAt
-    seasonLoading.value = false
-    loading.value = false
-    return
   }
   seasonLoading.value = true
   loading.value = true
@@ -277,32 +277,31 @@ const loadMikan = async (force = false, sequence = loadSequence) => {
     const selected = mikanFollowsCurrent.value
         ? undefined
         : mikanSeasons.value.find(item => item.seasonLabel === mikanSeason.value)
-    const res = await http.mikan('', selected || {})
-    if (sequence !== loadSequence) return
-    const data = res.data || {}
-    if (requestedSeason === 'current') {
-      rememberMikanCurrentSeason(data)
+    const result = await catalogRequest.load({
+      key: seasonCacheKey('mikan', requestedSeason),
+      force,
+      read: () => readSeasonCache('mikan', requestedSeason),
+      write: (key, data) => {
+        writeCache('mikan', requestedSeason, data)
+        return Date.now()
+      },
+      fetch: async () => (await http.mikan('', selected || {})).data || {}
+    })
+    if (result.source === 'stale' && result.data) {
+      applyCached({data: result.data})
+      cacheUpdatedAt.value = result.savedAt
+      return
     }
-    applyMikanData(data)
-    if (requestedSeason === 'current' && !mikanCurrentSeason.value) {
-      mikanCurrentSeason.value = mikanSeason.value
+    if (result.data) {
+      applyCached(result)
     }
-    writeCache('mikan', requestedSeason, data)
-  } catch (e) {
-    if (sequence !== loadSequence) return
-    if (cached) {
-      applyMikanData(cached.data)
-      cacheUpdatedAt.value = cached.savedAt
-      ElMessage.warning('网络请求失败，已显示缓存的季度数据')
-    } else {
+    if (result.error) {
       loadError.value = '季度数据加载失败，请检查网络或代理设置后重试'
-      ElMessage.error(e?.message || '加载季度数据失败')
+      ElMessage.error(result.error?.message || '加载季度数据失败')
     }
   } finally {
-    if (sequence === loadSequence) {
-      seasonLoading.value = false
-      loading.value = false
-    }
+    seasonLoading.value = false
+    loading.value = false
   }
 }
 
@@ -312,55 +311,50 @@ const applyAniBTData = data => {
   setWeeks((data.byWeekday || []).map(item => ({weekLabel: item.weekdayLabel, items: item.animes || []})))
 }
 
-const loadAniBT = async (force = false, sequence = loadSequence) => {
+const loadAniBT = async (force = false) => {
   const requestedSeason = resolveSeasonRequest(aniBTSeason.value, aniBTFollowsCurrent.value)
-  const cached = readCache('ani-bt', requestedSeason)
-  if (!force && cached && Date.now() - cached.savedAt < SEASON_CACHE_TTL) {
-    if (sequence !== loadSequence) return
+  const applyCached = cached => {
     if (requestedSeason === 'current' && cached.data?.requestedSeason) {
       aniBTCurrentSeason.value = cached.data.requestedSeason
     }
     applyAniBTData(cached.data)
-    cacheUpdatedAt.value = cached.savedAt
-    seasonLoading.value = false
-    loading.value = false
-    return
   }
   seasonLoading.value = true
   loading.value = true
   loadError.value = ''
   try {
-    const res = await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')
-    if (sequence !== loadSequence) return
-    const data = res.data || {}
-    if (requestedSeason === 'current' && data.requestedSeason) {
-      aniBTCurrentSeason.value = data.requestedSeason
+    const result = await catalogRequest.load({
+      key: seasonCacheKey('ani-bt', requestedSeason),
+      force,
+      read: () => readSeasonCache('ani-bt', requestedSeason),
+      write: (key, data) => {
+        writeCache('ani-bt', requestedSeason, data)
+        return Date.now()
+      },
+      fetch: async () => (await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')).data || {}
+    })
+    if (result.source === 'stale' && result.data) {
+      applyCached({data: result.data})
+      cacheUpdatedAt.value = result.savedAt
+      return
     }
-    applyAniBTData(data)
-    writeCache('ani-bt', requestedSeason, data)
-  } catch (e) {
-    if (sequence !== loadSequence) return
-    if (cached) {
-      applyAniBTData(cached.data)
-      cacheUpdatedAt.value = cached.savedAt
-      ElMessage.warning('网络请求失败，已显示缓存的季度数据')
-    } else {
+    if (result.data) {
+      applyCached(result)
+    }
+    if (result.error) {
       loadError.value = '季度数据加载失败，请检查网络或代理设置后重试'
-      ElMessage.error(e?.message || '加载季度数据失败')
+      ElMessage.error(result.error?.message || '加载季度数据失败')
     }
   } finally {
-    if (sequence === loadSequence) {
-      seasonLoading.value = false
-      loading.value = false
-    }
+    seasonLoading.value = false
+    loading.value = false
   }
 }
 
 const loadSource = (force = false) => {
-  const sequence = ++loadSequence
   cacheUpdatedAt.value = 0
   loadError.value = ''
-  return source.value === 'mikan' ? loadMikan(force, sequence) : loadAniBT(force, sequence)
+  return source.value === 'mikan' ? loadMikan(force) : loadAniBT(force)
 }
 const selectSeason = () => {
   if (source.value === 'mikan') {
@@ -453,19 +447,9 @@ const addSubscription = group => {
 
 const copyRss = async rss => {
   if (!rss) return
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(rss)
-    } else {
-      const input = document.createElement('textarea')
-      input.value = rss
-      document.body.appendChild(input)
-      input.select()
-      document.execCommand('copy')
-      input.remove()
-    }
+  if (await copyText(rss)) {
     ElMessage.success('RSS 地址已复制')
-  } catch (e) {
+  } else {
     ElMessage.error('复制失败，请手动复制')
   }
 }

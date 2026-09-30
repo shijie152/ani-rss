@@ -68,7 +68,7 @@
             <span>本地文件</span>
           </div>
           <UploadView
-              url="api/upload"
+              :url="uploadUrl"
               :extensions="['jpg', 'jpeg', 'png']"
               :callback="uploadCallback">
             <el-button bg icon="Upload">
@@ -98,8 +98,10 @@ import {notifySubscriptionsChanged} from '@/js/subscriptionChanges.js';
 import {toApiFile} from "@/js/global.js";
 import {withQuery} from "@/js/requestUtils.js";
 import * as http from "@/js/http.js";
+import {callbackEndpoints} from "@/js/endpoints.js";
 import UploadView from "@/view/custom/UploadView.vue";
 
+const uploadUrl = callbackEndpoints.upload.path
 const dialogVisible = ref(false)
 const ani = ref({})
 const time = ref()

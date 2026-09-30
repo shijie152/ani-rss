@@ -145,7 +145,7 @@
                   </el-tooltip>
                 </el-tag>
                 <UploadView v-else
-                            url="api/uploadAndReadToBase64"
+                            :url="uploadAndReadToBase64Url"
                             :extensions="['torrent']"
                             :callback="uploadCallback">
                   <el-button bg icon="Upload">选择并上传种子</el-button>
@@ -185,8 +185,10 @@ import CustomTagsView from "@/view/config/CustomTagsView.vue";
 import {aniData} from "@/js/ani.js";
 import * as http from "@/js/http.js";
 import {getBgmTitle} from "@/js/http.js";
+import {callbackEndpoints} from "@/js/endpoints.js";
 import UploadView from "@/view/custom/UploadView.vue";
 
+const uploadAndReadToBase64Url = callbackEndpoints.uploadAndReadToBase64.path
 let start = () => {
   startLoading.value = true
   http.startCollection(data.value)
