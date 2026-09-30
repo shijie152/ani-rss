@@ -161,7 +161,7 @@ import {
   writeSeasonCache
 } from "./seasonCatalogCache.js";
 import {registerMikanCacheScheduler} from './mikanCacheScheduler.js';
-import {copyText, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
 
 const mikanAdapter = sourceAdapters.mikan
 
@@ -335,22 +335,19 @@ let change = (v) => {
 let selectName = ref('')
 let groups = ref({})
 
-let collapseChange = (v) => {
-  if (!v) {
-    return
+// 展开字幕组：缓存与 loading 由共享 loader 管，视图只给端点调用。
+const subgroupLoader = createSubgroupLoader({
+  load: url => http.mikanGroup(url).then(res => res.data),
+  onLoading: value => {
+    groupLoading.value = value
   }
+})
+
+let collapseChange = async (v) => {
+  if (!v) return
   selectName.value = v
-  if (groups.value[v]) {
-    return;
-  }
-  groupLoading.value = true
-  http.mikanGroup(v)
-      .then(res => {
-        groups.value[v] = res.data
-      })
-      .finally(() => {
-        groupLoading.value = false
-      })
+  if (subgroupLoader.has(v)) return
+  groups.value = {...groups.value, [v]: await subgroupLoader.load(v)}
 }
 
 

@@ -8,6 +8,7 @@
 <script setup>
 import {authorization} from "@/js/global.js";
 import {sessionUrl} from "@/js/authenticatedUrl.js";
+import {endpointPath} from "@/js/endpoints.js";
 import {callbackEndpoints} from "@/js/endpoints.js";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {markRaw, ref} from "vue";
@@ -53,7 +54,7 @@ let callback = res => {
 
 let exportConfig = () => {
   let element = document.createElement('a');
-  element.href = sessionUrl('api/exportConfig', {}, {token: authorization.value})
+  element.href = sessionUrl(endpointPath('exportConfig'), {}, {token: authorization.value})
 
   document.body.appendChild(element);
 

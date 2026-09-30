@@ -108,6 +108,7 @@ import {computed, nextTick, onActivated, ref} from "vue";
 import {Search} from "@element-plus/icons-vue";
 import {authorization} from "@/js/global.js";
 import {sessionUrl} from "@/js/authenticatedUrl.js";
+import {endpointPath} from "@/js/endpoints.js";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import * as http from "@/js/http.js";
@@ -199,7 +200,7 @@ const clearLogs = () => {
 }
 
 const downloadLogs = () => {
-  window.open(sessionUrl('api/downloadLogs', {}, {token: authorization.value}))
+  window.open(sessionUrl(endpointPath('downloadLogs'), {}, {token: authorization.value}))
 }
 
 onActivated(getLogs)

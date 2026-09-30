@@ -88,23 +88,28 @@ test('upload views take their url from the endpoint table', async () => {
 // 端点表是路径的唯一来源：模块里再写一份 api/ 字面量，就是会漂移的第二份清单。
 // 白名单只有端点表自身与 http.js（http.js 通过 endpointPath 取名字，不含字面量）。
 test('no module outside the table hard-codes an api path', async () => {
-  const root = fileURLToPath(new URL('./', import.meta.url))
+  // 扫整个 src（含 .vue）：视图里的 sessionUrl('api/...') 同样是绕过表的第二份清单。
+  const root = fileURLToPath(new URL('../', import.meta.url))
   const walk = async dir => {
     const entries = await readdir(dir, {withFileTypes: true})
     const nested = await Promise.all(entries.map(entry => {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) return walk(path)
-      return entry.name.endsWith('.js') ? [path] : []
+      return /\.(js|vue|mjs)$/.test(entry.name) ? [path] : []
     }))
     return nested.flat()
   }
   const files = (await walk(root)).filter(file =>
-    !file.endsWith('endpoints.js') && !file.endsWith('.test.mjs'))
+    !file.endsWith('endpoints.js') && !/\.test\.mjs$/.test(file))
   const findings = []
   for (const file of files) {
     const source = await readFile(file, 'utf8')
+    // 只看可执行脚本段，避免把模板注释/文档里的示例算进来。
+    const script = file.endsWith('.vue')
+      ? [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n')
+      : source
     for (const match of source.matchAll(/['"`]api\/([A-Za-z]+)/g)) {
-      findings.push(`${file}: ${match[0]}`)
+      if (script.includes(match[0])) findings.push(`${file}: ${match[0]}`)
     }
   }
   assert.deepEqual(findings, [])

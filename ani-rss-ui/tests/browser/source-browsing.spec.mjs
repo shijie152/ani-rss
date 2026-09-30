@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import {expect, test} from '@playwright/test'
 
 // 三个源站页共用同一份浏览 module（分组 / 批量添加 / 复制）。这条冒烟在真实
@@ -6,6 +7,42 @@ const sources = [
   {tab: 'Mikan', label: 'Mikan'},
   {tab: 'AniBT', label: 'AniBT'},
   {tab: 'AnimeGarden', label: 'AnimeGarden'}
+]
+
+// 每个源站的列表响应与字幕组条目形状；批量添加走同一 submitBatch，但 adapter 不同，
+// 所以三个源站都要真跑一遍，而不是只看对话框能打开。
+const batchCases = [
+  {
+    tab: 'Mikan',
+    label: 'Mikan',
+    listRoute: '**/api/mikan**',
+    listBody: {
+      seasons: [{seasonLabel: '2026 春', select: true}],
+      weeks: [{weekLabel: '星期一', items: [{title: '冒烟番剧', url: 'https://mikan.example/a/1', cover: '', exists: false}]}]
+    },
+    groupRoute: '**/api/mikanGroup**',
+    groupBody: [{label: '字幕组A', updateDay: '周一', rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1', bgmUrl: 'https://bgm.tv/subject/1', groupRegex: {regexList: [[]], tags: []}}]
+  },
+  {
+    tab: 'AniBT',
+    label: 'AniBT',
+    listRoute: '**/api/aniBT**',
+    listBody: {
+      requestedSeason: '2026 春',
+      availableSeasons: ['2026 春'],
+      byWeekday: [{weekdayLabel: '星期一', animes: [{title: {primary: '冒烟番剧'}, bgmId: 2, rss: 'https://anibt.example/rss?bgmId=2'}]}]
+    },
+    groupRoute: '**/api/aniBTGroup**',
+    groupBody: [{name: '字幕组B', updateDay: '周一', rss: 'https://anibt.example/rss?bgmId=2', bgmId: 2, groupRegex: {regexList: [[]], tags: []}}]
+  },
+  {
+    tab: 'AnimeGarden',
+    label: 'AnimeGarden',
+    listRoute: '**/api/animeGardenList**',
+    listBody: [],
+    groupRoute: '**/api/animeGardenGroup**',
+    groupBody: [{name: '字幕组G', updateDay: '周一', rss: 'https://animegarden.example/rss', bgmId: 3, groupRegex: {regexList: [[]], tags: []}}]
+  }
 ]
 
 const mikanResponse = {
@@ -71,6 +108,63 @@ test('Mikan 批量添加走 submitBatch（rssToAni + addAni）', async ({page}) 
   await expect.poll(() => called.rssToAni, {timeout: 10_000}).toBeGreaterThan(0)
   await expect.poll(() => called.addAni, {timeout: 10_000}).toBeGreaterThan(0)
 })
+
+// 批量添加走同一份 submitBatch，但三个源站的 adapter 不同（分组键、字幕组字段、
+// 是否补 bgmUrl/subgroup 都不同），所以 Mikan 与 AniBT 各真跑一遍。
+for (const source of batchCases.filter(item => item.label !== 'AnimeGarden')) {
+  test(`${source.label} 批量添加走 submitBatch`, async ({page}) => {
+    const called = {rssToAni: 0, addAni: 0}
+    const drafts = []
+    const added = []
+    await page.addInitScript(() => localStorage.setItem('authorization', 'browser-smoke-token'))
+    await page.route(source.listRoute, route => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({code: 200, t: Date.now(), data: source.listBody})
+    }))
+    await page.route(source.groupRoute, route => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({code: 200, t: Date.now(), data: source.groupBody})
+    }))
+    // rssToAni 收到的是草稿：源站差异（Mikan 不带 bgmUrl/subgroup）在这里可断言。
+    await page.route('**/api/rssToAni', route => {
+      called.rssToAni++
+      drafts.push(route.request().postDataJSON())
+      return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: {id: '1', title: '番剧'}})})
+    })
+    await page.route('**/api/addAni', async route => {
+      called.addAni++
+      added.push(route.request().postDataJSON())
+      return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: null})})
+    })
+    await page.route('**/api/custom.css', route => route.fulfill({status: 200, contentType: 'text/css', body: ''}))
+    await page.route('**/api/custom.js', route => route.fulfill({status: 200, contentType: 'application/javascript', body: ''}))
+    await page.route('**/api/listAni', route => route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: []})}))
+    await page.route('**/api/config', route => route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: {}})}))
+
+    await page.goto('/#/subscriptions')
+    await page.getByRole('button', {name: '添加'}).click()
+    await page.getByRole('menuitem', {name: '添加订阅'}).click()
+    await page.getByRole('tab', {name: source.tab}).click()
+    await page.getByRole('button', {name: `浏览 ${source.label}`}).click()
+    await expect(page.getByRole('dialog', {name: source.label})).toBeVisible()
+
+    await page.getByText('冒烟番剧').first().click()
+    const checkbox = page.locator('.group-checkbox-wrapper input[type=checkbox]').first()
+    await checkbox.waitFor({state: 'attached', timeout: 10_000})
+    await checkbox.evaluate(node => node.click())
+    await page.getByRole('button', {name: '批量添加'}).click()
+
+    await expect.poll(() => called.rssToAni, {timeout: 10_000}).toBeGreaterThan(0)
+    await expect.poll(() => called.addAni, {timeout: 10_000}).toBeGreaterThan(0)
+    // Mikan 的草稿刻意不带 bgmUrl/subgroup（后端据此走详情页解析）；其他源站要带。
+    if (source.label === 'Mikan') {
+      assert.equal(drafts[0].bgmUrl, undefined)
+      assert.equal(drafts[0].subgroup, undefined)
+    } else {
+      assert.ok(drafts[0].bgmUrl, `${source.label} 草稿应带 bgmUrl`)
+    }
+  })
+}
 
 // 验收四步的最后一步：复制 RSS/磁力链。走 copyText（Clipboard 优先，失败回退）。
 test('Mikan 资源条目可以复制磁力链', async ({page}) => {

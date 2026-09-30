@@ -77,6 +77,7 @@ import * as http from "@/js/http.js";
 import {Github} from "@vicons/fa";
 import {getBaseUrl} from "@/js/global.js";
 import {apiKeyUrl} from "@/js/authenticatedUrl.js";
+import {endpointPath} from "@/js/endpoints.js";
 import {copyText} from '@/js/sourceBrowsing.js';
 
 let openUrl = (url) => window.open(url)
@@ -94,12 +95,12 @@ let clearCache = () => {
 }
 
 let copyEmbyApi = () => {
-  let url = apiKeyUrl('api/embyWebHook', {key: props.config.apiKey}, {base: getBaseUrl()});
+  let url = apiKeyUrl(endpointPath('embyWebHook'), {key: props.config.apiKey}, {base: getBaseUrl()});
   copy(url)
 }
 
 let copyIcs = () => {
-  let url = apiKeyUrl('api/calendar.ics', {key: props.config.apiKey}, {base: getBaseUrl()});
+  let url = apiKeyUrl(endpointPath('calendarIcs'), {key: props.config.apiKey}, {base: getBaseUrl()});
   copy(url)
 }
 

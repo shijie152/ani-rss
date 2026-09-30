@@ -71,7 +71,12 @@ export const callbackEndpoints = {
   importConfig: endpoint('api/importConfig'),
   // 资源端点：URL 直接进 img/file 标签，不走 http.js 的请求函数。
   proxyImage: endpoint('api/proxyImage', {method: 'GET'}),
-  file: endpoint('api/file', {method: 'GET'})
+  file: endpoint('api/file', {method: 'GET'}),
+  // 带凭据的 GET 端点：由 authenticatedUrl 拼 URL，路径仍归这张表。
+  exportConfig: endpoint('api/exportConfig', {method: 'GET'}),
+  downloadLogs: endpoint('api/downloadLogs', {method: 'GET'}),
+  embyWebHook: endpoint('api/embyWebHook', {method: 'GET'}),
+  calendarIcs: endpoint('api/calendar.ics', {method: 'GET'})
 }
 
 export const readOnlyPaths = new Set(
