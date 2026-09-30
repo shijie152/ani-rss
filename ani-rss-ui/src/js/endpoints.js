@@ -75,7 +75,7 @@ export const callbackEndpoints = {
   // 带凭据的 GET 端点：由 authenticatedUrl 拼 URL，路径仍归这张表。
   exportConfig: endpoint('api/exportConfig', {method: 'GET'}),
   downloadLogs: endpoint('api/downloadLogs', {method: 'GET'}),
-  embyWebHook: endpoint('api/embyWebHook', {method: 'GET'}),
+  embyWebHook: endpoint('api/embyWebHook'),
   calendarIcs: endpoint('api/calendar.ics', {method: 'GET'})
 }
 

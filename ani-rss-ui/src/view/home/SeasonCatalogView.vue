@@ -287,6 +287,8 @@ const loadMikan = async (force = false) => {
       },
       fetch: async () => (await http.mikan('', selected || {})).data || {}
     })
+    // 被更新的请求取代：直接丢弃，不能把旧季度的数据画到当前视图上。
+    if (result.stale) return
     if (result.source === 'stale' && result.data) {
       applyCached({data: result.data})
       cacheUpdatedAt.value = result.savedAt
@@ -339,6 +341,7 @@ const loadAniBT = async (force = false) => {
       },
       fetch: async () => (await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')).data || {}
     })
+    if (result.stale) return
     if (result.source === 'stale' && result.data) {
       applyCached({data: result.data})
       cacheUpdatedAt.value = result.savedAt

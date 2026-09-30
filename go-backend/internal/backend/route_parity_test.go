@@ -17,7 +17,8 @@ var (
 	// 路由注册有多种写法（helper 调用、Route 结构体字面量，方法名在前或在后），
 	// 这里按「同一条注册里同时出现 Method 与 Path」提取，不绑定顺序。
 	// 路径可能含多级斜杠（如 /api/bgm/oauth/callback）。
-	goRoutePattern = regexp.MustCompile(`(?m)http\.Method(\w+)[^\n]*?"(/api/[A-Za-z0-9/]+)"|"(/api/[A-Za-z0-9/]+)"[^\n]*?http\.Method(\w+)`)
+	// 路径可含多级斜杠与点号（/api/bgm/oauth/callback、/api/calendar.ics）。
+	goRoutePattern = regexp.MustCompile(`(?m)http\.Method(\w+)[^\n]*?"(/api/[A-Za-z0-9/._-]+)"|"(/api/[A-Za-z0-9/._-]+)"[^\n]*?http\.Method(\w+)`)
 )
 
 func TestUIEndpointTableMatchesGoRoutes(t *testing.T) {

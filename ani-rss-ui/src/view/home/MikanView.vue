@@ -161,7 +161,14 @@ import {
   writeSeasonCache
 } from "./seasonCatalogCache.js";
 import {registerMikanCacheScheduler} from './mikanCacheScheduler.js';
-import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+import {
+  buildAddDraft,
+  buildRegexList,
+  copyText,
+  createSubgroupLoader,
+  sourceAdapters,
+  submitBatch
+} from '@/js/sourceBrowsing.js';
 import {createCatalogRequest} from '@/js/catalogRequest.js';
 
 const mikanAdapter = sourceAdapters.mikan
@@ -285,6 +292,8 @@ const list = async (query = '', body = {}, options = {}) => {
       fetch: async () => (await http.mikan(normalizedText, normalizedBody)).data
           || {seasons: [], weeks: [], totalItems: 0}
     })
+    // 被更新的请求取代：丢弃，避免旧搜索词/旧季度的数据覆盖当前视图。
+    if (result.stale) return null
     const response = result.data || {seasons: [], weeks: [], totalItems: 0}
     applyData(response)
     // module 在请求失败时会回退缓存并带 error 返回（不抛错），这里负责提示。
@@ -316,10 +325,14 @@ let selectName = ref('')
 let groups = ref({})
 
 // 展开字幕组：缓存与 loading 由共享 loader 管，视图只给端点调用。
+const loadingGroups = new Set()
 const subgroupLoader = createSubgroupLoader({
   load: url => http.mikanGroup(url).then(res => res.data),
-  onLoading: value => {
-    groupLoading.value = value
+  // 并发展开多个字幕组时按 key 计数：一个完成不能把仍在加载的 spinner 关掉。
+  onLoading: (value, key) => {
+    if (value) loadingGroups.add(key)
+    else loadingGroups.delete(key)
+    groupLoading.value = loadingGroups.size > 0
   }
 })
 
@@ -342,15 +355,8 @@ let addAni = ref({
 let regexList = ref([])
 
 let callback = v => {
-  let {rss, bgmUrl, label} = v
-  regexList.value = JSON.parse(JSON.stringify(v.groupRegex.regexList))
-
-  addAni.value.url = rss
-  addAni.value.bgmUrl = bgmUrl
-  addAni.value.subgroup = label
-  addAni.value.match = '[]'
-
-  regexList.value.push([])
+  regexList.value = buildRegexList(v)
+  addAni.value = {...addAni.value, ...buildAddDraft(v, mikanAdapter)}
   matchDialogVisible.value = true
 }
 

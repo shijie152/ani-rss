@@ -89,6 +89,21 @@ test('failed request falls back to the cached catalogue', async () => {
   assert.equal(result.error.message, '上游不可用')
 })
 
+// 被取代的响应必须带可判定的标记：视图靠它丢弃旧数据。此前用 {stale:true}
+// 而视图检查 source === 'stale'，标记对不上，旧响应照旧被渲染。
+test('superseded responses are marked so callers can drop them', async () => {
+  const catalog = createCatalogRequest({ttl: 1000, now: () => 1})
+  let resolveSlow
+  const slow = catalog.load({key: 'A', fetch: () => new Promise(resolve => { resolveSlow = resolve })})
+  const fast = catalog.load({key: 'B', fetch: async () => ({value: 'B'})})
+  resolveSlow({value: 'A'})
+
+  const superseded = await slow
+  assert.equal(superseded.stale, true)
+  assert.equal(superseded.source, undefined)
+  assert.deepEqual((await fast).data, {value: 'B'})
+})
+
 test('a late response from an older request is discarded', async () => {
   const cache = memoryCache()
   const catalog = createCatalogRequest({ttl, now: () => 1000})

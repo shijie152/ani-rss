@@ -23,6 +23,16 @@ const loadMutant = async (relativePath, label, mutate) => {
 
 let killed = 0
 const kill = async (label, relativePath, mutate, assertion) => {
+  // 先确认断言在未变异的源码上通过：否则断言写错也会「杀死」变异，
+  // 变异测试就永远绿、毫无约束力。
+  const pristine = await import(
+    `${pathToFileURL(join(repo, 'ani-rss-ui', relativePath)).href}?pristine=${Date.now()}-${Math.random()}`
+  )
+  try {
+    await assertion(pristine)
+  } catch (error) {
+    throw new Error(`${label}: assertion fails on unmutated source (${error?.message ?? error})`)
+  }
   const module = await loadMutant(relativePath, label, mutate)
   try {
     await assertion(module)
@@ -105,12 +115,14 @@ await kill(
   'source-browsing-groups-by-subject',
   'src/js/sourceBrowsing.js',
   source => source.replace('const subject = adapter.subjectId(item)', 'const subject = item.rss'),
-  async ({submitBatch}) => {
-    const adapter = {subjectId: item => new URL(item.rss).searchParams.get('bangumiId')}
+  async ({submitBatch, sourceAdapters}) => {
+    // 用真实 adapter，而不是手造一个残缺对象（缺字段会让断言在未变异源码上就失败）。
+    const adapter = sourceAdapters.mikan
     const drafts = []
     await submitBatch([
-      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&subgroup=a'},
-      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&subgroup=b'}
+      // 两条 rss 不同、但 bangumiId 相同：只有真按 subject 分组才会合并成一条。
+      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&group=a', label: '字幕组A'},
+      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&group=b', label: '字幕组B'}
     ], adapter, {add: async draft => drafts.push(draft)})
     assert.equal(drafts.length, 1)
   }
@@ -128,13 +140,13 @@ await kill(
       read: key => values.get(key) ?? null,
       write: (key, data) => { values.set(key, {savedAt: (now += 1), data}); return now }
     }
-    const catalog = createCatalogRequest({ttl: 100, now: () => now})
+    // 注入同步 executor：刷新在 load 返回前完成，断言不依赖任何测试专用 API。
+    const catalog = createCatalogRequest({ttl: 100, now: () => now, background: task => { void task() }})
     await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'old'})})
     now += 1000
     const result = await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'new'})})
     assert.equal(result.source, 'stale')
     assert.equal(result.data.value, 'old')
-    await catalog.settled()
     const refreshed = await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'never'})})
     assert.equal(refreshed.data.value, 'new')
   }
