@@ -35,20 +35,20 @@ const sourceFiles = async directory => {
   return nested.flat()
 }
 
-const findRawDynamicQueryParams = source =>
-    source.match(/[?&][A-Za-z0-9_-]+=[^'"`\s]*\$\{[^}]+\}/g) || []
-
 const executableSource = (file, source) => file.endsWith('.vue')
     ? [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(match => match[1]).join('\n')
     : source
 
-test('dynamic query parameters in UI source are not interpolated by hand', async () => {
+// 带凭据的 URL 不再扫源码校验：authenticatedUrl.test.mjs 直接断言 module 的
+// 输出，比正则扫文本更强，也不再依赖「所有调用点都恰好写成某种形状」。
+test('UI source does not hand-build authenticated query strings', async () => {
   const files = await sourceFiles(fileURLToPath(new URL('./', import.meta.url)))
   const findings = (await Promise.all(files.map(async file => ({
     file,
-    matches: findRawDynamicQueryParams(executableSource(file, await readFile(file, 'utf8')))
-  })))).flatMap(({file, matches}) => matches.map(match => `${file}: ${match}`))
+    source: executableSource(file, await readFile(file, 'utf8'))
+  })))).flatMap(({file, source}) =>
+    /[?&](s|api-key)=\$\{/.test(source) ? [file] : []
+  )
 
-  assert.deepEqual(findRawDynamicQueryParams('window.open(`api/export?s=${token}`)'), ['?s=${token}'])
   assert.deepEqual(findings, [])
 })

@@ -1,4 +1,6 @@
 import {useColorMode, useDark, useDebounceFn, useEventListener, useLocalStorage} from "@vueuse/core";
+import {sessionUrl} from "@/js/authenticatedUrl.js";
+import {endpointPath} from "@/js/endpoints.js";
 
 /**
  * 保存登录信息
@@ -133,25 +135,16 @@ const getBaseUrl = () => {
     return `${protocol}//${host}${pathname}`
 }
 
-const toApiUrl = (path, params) => {
-    const url = new URL(getBaseUrl())
-    url.pathname += path
-    url.search = new URLSearchParams(params).toString()
-    return url.toString();
-}
-
 const proxyImage = imgUrl => {
-    return toApiUrl('api/proxyImage', {
+    return sessionUrl(endpointPath('proxyImage'), {
         imgUrl: base64Encode(imgUrl),
-        s: authorization.value
-    })
+    }, {base: getBaseUrl(), token: authorization.value})
 }
 
 const toApiFile = filename => {
-    return toApiUrl('api/file', {
+    return sessionUrl(endpointPath('file'), {
         filename: base64Encode(filename),
-        s: authorization.value
-    })
+    }, {base: getBaseUrl(), token: authorization.value})
 }
 
 export {
@@ -172,7 +165,6 @@ export {
     initTheme,
     initLayout,
     base64Encode,
-    toApiUrl,
     proxyImage,
     toApiFile,
     getBaseUrl

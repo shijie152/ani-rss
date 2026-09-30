@@ -1,10 +1,4 @@
-export const readOnlyPostPaths = new Set([
-  'api/config', 'api/listAni', 'api/about', 'api/mikan', 'api/mikanGroup',
-  'api/aniBT', 'api/aniBTGroup', 'api/animeGardenList', 'api/animeGardenGroup',
-  'api/logs', 'api/torrentsInfos', 'api/getThemoviedbName',
-  'api/getThemoviedbGroup', 'api/getBgmTitle', 'api/searchBgm', 'api/playList',
-  'api/getSubtitles', 'api/getAniBySubjectId', 'api/ping'
-])
+import {readOnlyPaths} from './endpoints.js'
 
 export const withQuery = (url, params = {}, base = 'http://localhost/') => {
   const parsed = new URL(url, base)
@@ -33,5 +27,5 @@ const endpointPath = url => url.split('?')[0].replace(/^\/+/, '')
 export const shouldDedupe = (url, method, options = {}) => {
   if (options.dedupe !== undefined) return options.dedupe
   if (method === 'GET') return true
-  return method === 'POST' && readOnlyPostPaths.has(endpointPath(url))
+  return method === 'POST' && readOnlyPaths.has(endpointPath(url))
 }
