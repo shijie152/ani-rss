@@ -42,7 +42,10 @@
             <el-button :disabled="rssList.length < 1" bg icon="Plus" text @click="batchAddition">批量添加</el-button>
           </div>
         </div>
-        <div v-loading="loading" class="scroll-container">
+        <el-empty v-if="!loading && loadError" :description="loadError">
+          <el-button type="primary" @click="list(lastQuery)">重试</el-button>
+        </el-empty>
+        <div v-else v-loading="loading" class="scroll-container">
           <el-tabs v-model="activeName" class="week-tabs">
             <el-tab-pane v-for="item in data.items" :key="item.weekLabel"
                          :label="item.weekLabel" :name="item.weekLabel" lazy>
@@ -174,6 +177,8 @@ let show = (bgmUrl = '') => {
 
 let list = async (bgmUrl = '') => {
   loading.value = true
+  loadError.value = ''
+  lastQuery = bgmUrl
   return http.animeGardenList(bgmUrl)
       .then(res => {
         let items = res.data;
@@ -182,10 +187,16 @@ let list = async (bgmUrl = '') => {
           ElMessage.warning("搜索结果为空")
         }
 
-        data.value.items = items
-        if (items.length) {
+        data.value.items = items || []
+        if (data.value.items.length) {
           activeName.value = items[0].weekLabel
         }
+      })
+      .catch(e => {
+        // 失败要留在页面上：只弹 toast 会转瞬即逝，用户看到的是空白面板。
+        loadError.value = '目录数据加载失败，请检查网络或代理设置后重试'
+        data.value.items = []
+        ElMessage.error(e?.message || '加载 AnimeGarden 数据失败')
       })
       .finally(() => {
         loading.value = false
@@ -193,6 +204,9 @@ let list = async (bgmUrl = '') => {
 }
 
 let selectName = ref('')
+const loadError = ref('')
+// 重试要重放同一个查询：show(bgmUrl) 与添加流程的 list() 参数不同。
+let lastQuery = ''
 let groups = ref({})
 
 // 展开字幕组：缓存与 loading 由共享 loader 管，视图只给端点调用。

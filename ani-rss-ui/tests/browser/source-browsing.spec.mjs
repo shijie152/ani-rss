@@ -110,9 +110,9 @@ test('Mikan 批量添加走 submitBatch（rssToAni + addAni）', async ({page}) 
 })
 
 // 批量添加走同一份 submitBatch，但三个源站的 adapter 不同（分组键、字幕组字段、
-// 是否补 bgmUrl/subgroup 都不同）。AnimeGarden 的列表需要 show(bgmUrl) 传参，
-// 从添加订阅流程进入时列表为空，无法在这条路径上驱动到批量添加——它的适配器
-// 行为由 sourceBrowsing.test.mjs 覆盖。
+// 是否补 bgmUrl/subgroup 都不同）。AnimeGarden 未纳入此循环：添加流程的 show()
+// 不传 bgmUrl，后端返回的是按星期分组的全站目录（结构为 item.subjects，与另两个
+// 源站不同），该路径的适配器行为由 sourceBrowsing.test.mjs 覆盖。
 for (const source of batchCases.filter(item => item.label !== 'AnimeGarden')) {
   test(`${source.label} 批量添加走 submitBatch`, async ({page}) => {
     const called = {rssToAni: 0, addAni: 0}
@@ -213,6 +213,41 @@ test('Mikan 资源条目可以复制磁力链', async ({page}) => {
       .toEqual(['magnet:?xt=urn:btih:smoke'])
 })
 
+// 目录请求失败时不能只弹一个转瞬即逝的 toast、留下空白面板：要给出可读的错误
+// 与重试入口（与季度页的 loadError 模式一致），并且不产生未处理拒绝。
+test('AnimeGarden 目录请求失败时给出错误提示与重试', async ({page}) => {
+  const pageErrors = []
+  page.on('pageerror', error => pageErrors.push(String(error)))
+  let attempts = 0
+  await page.addInitScript(() => localStorage.setItem('authorization', 'browser-smoke-token'))
+  await page.route('**/api/animeGardenList**', route => {
+    attempts++
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({code: 500, message: '上游不可用', t: Date.now(), data: null})
+    })
+  })
+  await page.route('**/api/custom.css', route => route.fulfill({status: 200, contentType: 'text/css', body: ''}))
+  await page.route('**/api/custom.js', route => route.fulfill({status: 200, contentType: 'application/javascript', body: ''}))
+  await page.route('**/api/listAni', route => route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: {releaseDateList: [], weekList: [], total: 0}})}))
+  await page.route('**/api/config', route => route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: {}})}))
+  await page.route('**/api/testIpWhitelist**', route => route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({code: 200, t: Date.now(), data: null})}))
+
+  await page.goto('/#/subscriptions')
+  await page.getByRole('button', {name: '添加'}).click()
+  await page.getByRole('menuitem', {name: '添加订阅'}).click()
+  await page.getByRole('tab', {name: 'AnimeGarden'}).click()
+  await page.getByRole('button', {name: '浏览 AnimeGarden'}).click()
+
+  // 失败提示要留在页面上（不是转瞬即逝的 toast），并提供重试。
+  const dialog = page.getByRole('dialog', {name: 'AnimeGarden'})
+  await expect(dialog).toContainText('加载失败', {timeout: 10_000})
+  const retry = dialog.getByRole('button', {name: /重试/})
+  await expect(retry).toBeAttached()
+  await retry.click()
+  await expect.poll(() => attempts, {timeout: 10_000}).toBeGreaterThan(1)
+  assert.deepEqual(pageErrors, [], '不应有未处理的页面错误')
+})
 test('每个源站页都能打开并渲染', async ({page}) => {
   await page.addInitScript(() => localStorage.setItem('authorization', 'browser-smoke-token'))
   await page.route('**/api/mikan**', route => route.fulfill({
