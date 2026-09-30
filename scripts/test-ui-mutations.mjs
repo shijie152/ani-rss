@@ -10,7 +10,11 @@ await mkdir(tempDir, {recursive: true})
 const loadMutant = async (relativePath, label, mutate) => {
   const originalPath = join(repo, 'ani-rss-ui', relativePath)
   const original = await readFile(originalPath, 'utf8')
-  let mutant = mutate(original)
+  // 变异体写到临时目录后，相对 import 不再指向源码树；逐条改回绝对路径。
+  let mutant = mutate(original).replaceAll(
+    /from\s+'(\.\/[^']+)'/g,
+    (_, specifier) => `from '${pathToFileURL(join(repo, 'ani-rss-ui/src/js', specifier)).href}'`
+  )
   assert.notEqual(mutant, original, `${label}: mutation did not change source`)
   const target = join(tempDir, `${label.replaceAll(/[^a-z0-9_-]/gi, '_')}.mjs`)
   await writeFile(target, mutant)
@@ -44,8 +48,8 @@ await kill(
   'request-dedupe-scope',
   'src/js/requestUtils.js',
   source => source.replace(
-    'method === \'POST\' && readOnlyPostPaths',
-    'method === \'POST\' || readOnlyPostPaths'
+    'method === \'POST\' && readOnlyPaths',
+    'method === \'POST\' || readOnlyPaths'
   ),
   ({shouldDedupe}) => assert.equal(shouldDedupe('api/addAni', 'POST'), false)
 )
@@ -68,6 +72,84 @@ await kill(
     requestKey('api/mikan?text=春', 'POST'),
     requestKey('api/mikan?text=夏', 'POST')
   )
+)
+
+// 复制助手：Clipboard 不可用时必须回退，且失败要如实返回 false。
+await kill(
+  'copy-text-fallback-and-result',
+  'src/js/sourceBrowsing.js',
+  source => source.replace('return copied', 'return true'),
+  async ({copyText}) => {
+    const document = {
+      body: {appendChild() {}, removeChild() {}},
+      createElement: () => ({value: '', select() {}}),
+      execCommand: () => false
+    }
+    assert.equal(await copyText('rss', null, {document}), false)
+  }
+)
+
+// 鉴权 URL module：凭据必须进 query，且两种凭据不能互相串味。
+await kill(
+  'authenticated-url-credential-placement',
+  'src/js/authenticatedUrl.js',
+  source => source.replace('build(path, {...params, s: token}, base)', 'build(path, {...params}, base)'),
+  ({sessionUrl}) => {
+    const url = new URL(sessionUrl('api/downloadLogs', {}, {base: 'http://ani-rss.test/', token: 'tok'}))
+    assert.equal(url.searchParams.get('s'), 'tok')
+  }
+)
+
+// 源站浏览 module：同一番剧的字幕组条目必须归到一组（否则批量添加会重复建订阅）。
+await kill(
+  'source-browsing-groups-by-subject',
+  'src/js/sourceBrowsing.js',
+  source => source.replace('const subject = adapter.subjectId(item)', 'const subject = item.rss'),
+  async ({submitBatch}) => {
+    const adapter = {subjectId: item => new URL(item.rss).searchParams.get('bangumiId')}
+    const drafts = []
+    await submitBatch([
+      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&subgroup=a'},
+      {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1&subgroup=b'}
+    ], adapter, {add: async draft => drafts.push(draft)})
+    assert.equal(drafts.length, 1)
+  }
+)
+
+// 目录请求 module 的两条核心决策：过期必须后台刷新，旧响应必须丢弃。
+await kill(
+  'catalog-stale-serves-and-refreshes',
+  'src/js/catalogRequest.js',
+  source => source.replace('if (cached && !force) {', 'if (false) {'),
+  async ({createCatalogRequest}) => {
+    let now = 1000
+    const values = new Map()
+    const cache = {
+      read: key => values.get(key) ?? null,
+      write: (key, data) => { values.set(key, {savedAt: (now += 1), data}); return now }
+    }
+    const catalog = createCatalogRequest({ttl: 100, now: () => now})
+    await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'old'})})
+    now += 1000
+    const result = await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'new'})})
+    assert.equal(result.source, 'stale')
+    assert.equal(result.data.value, 'old')
+    await catalog.settled()
+    const refreshed = await catalog.load({key: 'k', ...cache, fetch: async () => ({value: 'never'})})
+    assert.equal(refreshed.data.value, 'new')
+  }
+)
+
+// 端点表是去重决策的唯一来源：把它改空（等价于回到「两份手写清单漂移」的
+// 老样子）必须被测试抓住。
+await kill(
+  'endpoint-readonly-table-drift',
+  'src/js/endpoints.js',
+  source => source.replace(
+    'Object.values(endpoints).filter(item => item.readOnly).map(item => item.path)',
+    '[]'
+  ),
+  ({readOnlyPaths}) => assert.equal(readOnlyPaths.has('api/mikan'), true)
 )
 
 await kill(
@@ -160,3 +242,12 @@ await kill(
 )
 
 console.log(`UI mutation tests passed: ${killed} mutants killed`)
+
+// 文档里的「N 个变异」是手写的，历史上漂移过两次；这里核对一次，
+// 数字对不上就让门禁失败，而不是等下次有人偶然发现。
+const docPath = join(repo, 'docs', 'testing-ui.md')
+const doc = await readFile(docPath, 'utf8')
+const documented = doc.match(/等 (\d+) 个行为/)?.[1]
+if (documented !== String(killed)) {
+  throw new Error(`docs/testing-ui.md 写的是 ${documented ?? '(未找到)'} 个变异，实际杀死 ${killed} 个`)
+}

@@ -16,6 +16,8 @@ ANI-RSS 当前后端是一个 Spring Boot Java 单体应用。它能够完成番
 
 Go 后端必须保持当前 UI 所依赖的 HTTP API 契约，包括路径、HTTP 方法、参数名、请求体、返回 JSON 字段、认证方式、Cookie/Token 行为和错误响应约定。当前 UI、Emby Webhook、ICS、API Key、MCP、Swagger、文件、上传和下载日志等外部入口都属于最终功能范围。
 
+「UI 不需要修改」指的是上述契约不因迁移而变，不是前端源码冻结：在契约不变的前提下，前端内部可以重构（请求层、端点表、共享 module）。契约由 `go-backend/internal/backend/route_parity_test.go` 逐条守卫，前端端点表 `ani-rss-ui/src/js/endpoints.js` 是其真相源。详见 `docs/adr/0003-frontend-internal-refactor.md`。
+
 ## User Stories
 
 1. As an ANI-RSS user, I want to use the existing UI without changing or relearning it, so that the backend rewrite is invisible to me.
