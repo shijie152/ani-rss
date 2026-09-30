@@ -10,7 +10,7 @@
 - [x] 缓存过期时先返回旧数据并在后台刷新
 - [x] 请求失败时回退到缓存数据
 - [x] 晚到的过期响应被丢弃，不覆盖新结果
-- [x] 时间策略只有一处定义（`createCatalogRequest({ttl})`），季度视图两个 loader 不再各写一份决策（视图 -60 行）
+- [x] 时间策略只有一处定义（`createCatalogRequest({ttl})`，支持按调用覆盖 ttl）：季度视图两个 loader 与 Mikan 的搜索/季度目录都走它，视图里不再有第二套 TTL/序列守卫/失败回退
 
 ## Test plan
 

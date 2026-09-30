@@ -7,10 +7,11 @@
 export const createCatalogRequest = ({ttl, now = Date.now, background = task => { void task() }} = {}) => {
   let sequence = 0
 
-  const load = async ({key, fetch, read, write, force = false} = {}) => {
+  // ttl 可被单次调用覆盖：搜索用 30 分钟、季度目录用 7 天，共用一个 module。
+  const load = async ({key, fetch, read, write, force = false, ttl: callTtl} = {}) => {
     const current = ++sequence
     const cached = read ? read(key) : null
-    const fresh = cached && now() - cached.savedAt < ttl
+    const fresh = cached && now() - cached.savedAt < (callTtl ?? ttl)
     if (!force && fresh) return {data: cached.data, savedAt: cached.savedAt, source: 'cache'}
 
     const run = async () => {

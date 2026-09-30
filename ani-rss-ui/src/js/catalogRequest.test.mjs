@@ -109,6 +109,34 @@ test('a late response from an older request is discarded', async () => {
   assert.equal(settled.data.value, 'second')
 })
 
+// Mikan 搜索与季度目录共用一个 module，但新鲜窗口不同（搜索 30 分钟、季度 7 天）：
+// 允许按调用覆盖 ttl，否则只能再手写一套决策。
+test('a call can override the freshness window', async () => {
+  const cache = memoryCache()
+  const catalog = createCatalogRequest({ttl: 7 * 24 * 60 * 60 * 1000, now: () => 1000})
+  let calls = 0
+  const fetch = async () => { calls++; return {value: calls} }
+
+  await catalog.load({key: 'search', ...cache, fetch, ttl: 60 * 1000})
+  const cached = await catalog.load({key: 'search', ...cache, fetch, ttl: 60 * 1000})
+
+  assert.equal(calls, 1)
+  assert.equal(cached.source, 'cache')
+})
+
+test('a shorter per-call window makes the entry stale while the default would not', async () => {
+  const cache = memoryCache()
+  let now = 1000
+  const catalog = createCatalogRequest({ttl: 7 * 24 * 60 * 60 * 1000, now: () => now})
+  const fetch = async () => ({value: 'fresh'})
+  await catalog.load({key: 'k', ...cache, fetch, ttl: 60 * 1000})
+
+  now += 2 * 60 * 1000
+  const result = await catalog.load({key: 'k', ...cache, fetch, ttl: 60 * 1000})
+
+  assert.equal(result.source, 'stale')
+})
+
 test('without a cache port the module still loads', async () => {
   const catalog = createCatalogRequest({ttl, now: () => 1000})
   const result = await catalog.load({key: 'season', fetch: async () => ({value: 'direct'})})

@@ -162,6 +162,7 @@ import {
 } from "./seasonCatalogCache.js";
 import {registerMikanCacheScheduler} from './mikanCacheScheduler.js';
 import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from '@/js/sourceBrowsing.js';
+import {createCatalogRequest} from '@/js/catalogRequest.js';
 
 const mikanAdapter = sourceAdapters.mikan
 
@@ -172,7 +173,6 @@ let groupLoading = ref(false)
 let activeName = ref("")
 let dialogVisible = ref(false)
 let loading = ref(false)
-let requestSequence = 0
 let lastRequest = null
 let data = ref({
   'seasons': [],
@@ -225,6 +225,10 @@ let searchLoading = ref(false)
 const SEASON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
 const SEARCH_CACHE_TTL = 30 * 60 * 1000
 
+// 搜索与季度目录共用同一份缓存决策（命中/过期后台刷新/失败回退/旧响应丢弃），
+// 新鲜窗口按调用给：搜索 30 分钟、季度 7 天。
+const catalogRequest = createCatalogRequest({ttl: SEASON_CACHE_TTL})
+
 let search = () => {
   if (text.value.length === 1) {
     ElMessage.error("搜索最少需要两个字符")
@@ -252,76 +256,52 @@ const applyData = response => {
   }
 }
 
-const cacheForRequest = (query, body) => {
-  const normalizedText = String(query || '').trim()
-  if (normalizedText) {
-    return {
-      type: 'search',
-      key: normalizedText,
-      cached: readMikanSearchCache(normalizedText),
-      ttl: SEARCH_CACHE_TTL
-    }
-  }
-  const season = body?.seasonLabel
-      || (body?.year && body?.season ? `${body.year} ${body.season}` : '')
-  return {
-    type: 'season',
-    key: season || 'current',
-    cached: readSeasonCache('mikan', season || 'current'),
-    ttl: SEASON_CACHE_TTL
-  }
-}
-
-const saveCache = (cache, response) => {
-  if (cache.type === 'search') {
-    writeMikanSearchCache(cache.key, response)
-  } else {
-    writeSeasonCache('mikan', cache.key, response)
-  }
-}
-
 const list = async (query = '', body = {}, options = {}) => {
-  const sequence = ++requestSequence
   const normalizedText = String(query || '').trim()
   const normalizedBody = body && typeof body === 'object' ? {...body} : {}
-  const cache = cacheForRequest(normalizedText, normalizedBody)
-  const cached = cache.cached
   const background = options.background === true
   const force = options.force === true
   lastRequest = {text: normalizedText, body: normalizedBody}
 
-  if (!force && cached) {
-    applyData(cached.data)
-    // Stale-while-revalidate: keep the cached catalogue visible while the
-    // source request runs instead of covering it with a loading mask.
-    loading.value = false
-    if (Date.now() - cached.savedAt < cache.ttl) {
-      return cached.data
-    }
-  }
-
-  const showLoading = !background && !cached
+  const isSearch = normalizedText !== ''
+  const season = normalizedBody?.seasonLabel
+      || (normalizedBody?.year && normalizedBody?.season
+          ? `${normalizedBody.year} ${normalizedBody.season}`
+          : 'current')
+  const key = isSearch ? normalizedText : season
+  const showLoading = !background
   if (showLoading) loading.value = true
   try {
-    const res = await http.mikan(normalizedText, normalizedBody)
-    if (sequence !== requestSequence) return res.data
-    const response = res.data || {seasons: [], weeks: [], totalItems: 0}
+    const result = await catalogRequest.load({
+      key,
+      force,
+      ttl: isSearch ? SEARCH_CACHE_TTL : SEASON_CACHE_TTL,
+      read: () => isSearch ? readMikanSearchCache(key) : readSeasonCache('mikan', key),
+      write: (writeKey, data) => {
+        if (isSearch) writeMikanSearchCache(writeKey, data)
+        else writeSeasonCache('mikan', writeKey, data)
+        return Date.now()
+      },
+      fetch: async () => (await http.mikan(normalizedText, normalizedBody)).data
+          || {seasons: [], weeks: [], totalItems: 0}
+    })
+    const response = result.data || {seasons: [], weeks: [], totalItems: 0}
     applyData(response)
-    saveCache(cache, response)
+    // module 在请求失败时会回退缓存并带 error 返回（不抛错），这里负责提示。
+    if (result.error) {
+      if (result.source === 'cache') {
+        ElMessage.warning('网络请求失败，已显示缓存的 Mikan 数据')
+      } else {
+        ElMessage.error(result.error?.message || '加载 Mikan 数据失败')
+      }
+      return response
+    }
     if (response.totalItems < 1 && normalizedText) {
       ElMessage.warning("搜索结果为空")
     }
     return response
-  } catch (e) {
-    if (sequence !== requestSequence) return null
-    if (!cached) {
-      ElMessage.error(e?.message || '加载 Mikan 数据失败')
-    } else if (!background) {
-      ElMessage.warning('网络请求失败，已显示缓存的 Mikan 数据')
-    }
-    return cached?.data || null
   } finally {
-    if (sequence === requestSequence && showLoading) loading.value = false
+    if (showLoading) loading.value = false
   }
 }
 
