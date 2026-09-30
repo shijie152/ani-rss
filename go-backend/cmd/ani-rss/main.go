@@ -4,18 +4,14 @@ import (
 	"context"
 	"flag"
 	"log/slog"
-	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"time"
 
-	"github.com/shijie152/ani-rss/go-backend/internal/backend"
+	"github.com/shijie152/ani-rss/go-backend/internal/bootstrap"
 	"github.com/shijie152/ani-rss/go-backend/internal/desktop"
-	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
 )
 
 // version is injected by the release build. The development value keeps local
@@ -35,74 +31,58 @@ func main() {
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var restartRequested atomic.Bool
-	domains := splitDomains(*goDomains)
-	app, err := backend.New(backend.Options{ConfigDir: *configDirectory, Version: version, UpdateEndpoint: envOrDefault("UPDATE_API_URL", "https://api.github.com/repos/wushuo894/ani-rss/releases/latest"), Shutdown: func(restart bool) {
-		restartRequested.Store(restart)
-		if *gui {
-			desktop.Stop()
-		}
-		stop()
-	}, OwnershipDomains: domains, MCPEnabled: *mcpEnabled, SwaggerEnabled: *swaggerEnabled})
+	// 真实监听地址：端口写 0 时 flag 里的值不是实际端口，托盘与日志都要用它。
+	boundAddress := make(chan string, 1)
+	// 装配、生命周期与重启都归 bootstrap：这里只读选项。
+	service, err := bootstrap.New(bootstrap.Options{
+		ConfigDir:        *configDirectory,
+		UIDirectory:      *uiDirectory,
+		ListenAddress:    *listenAddress,
+		Version:          version,
+		UpdateEndpoint:   envOrDefault("UPDATE_API_URL", "https://api.github.com/repos/wushuo894/ani-rss/releases/latest"),
+		OwnershipDomains: splitDomains(*goDomains),
+		MCPEnabled:       *mcpEnabled,
+		SwaggerEnabled:   *swaggerEnabled,
+		OnShutdown: func(restart bool) {
+			restartRequested.Store(restart)
+			if *gui {
+				desktop.Stop()
+			}
+			stop()
+		},
+		// 端口为 0 时 flag 里的地址不是真实监听地址，用实际绑定的那个。
+		OnListening: func(address string) {
+			slog.Info("ANI-RSS Go service listening", "address", address, "ui", *uiDirectory)
+			select {
+			case boundAddress <- address:
+			default:
+			}
+		},
+	})
 	if err != nil {
 		slog.Error("Go backend initialization failed", "error", err)
 		os.Exit(1)
 	}
-	defer app.Close()
+	defer service.App().Close()
 
-	server := &http.Server{
-		Addr: *listenAddress,
-		Handler: gateway.New(gateway.Config{
-			UIDirectory:     *uiDirectory,
-			ConfigDirectory: *configDirectory,
-			GoRoutes:        app.Routes(),
-			GoDomains:       app.OwnedDomains(),
-		}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	schedulerDone := make(chan struct{})
-	go func() {
-		defer close(schedulerDone)
-		app.RunSchedulers(shutdownContext)
-	}()
-
-	go func() {
-		<-shutdownContext.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
-			slog.Error("gateway shutdown failed", "error", err)
-		}
-	}()
-
-	slog.Info("ANI-RSS Go service listening", "address", *listenAddress, "ui", *uiDirectory)
+	runDone := make(chan error, 1)
+	go func() { runDone <- service.Run(shutdownContext) }()
 	if *gui {
-		go func() {
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("gateway stopped", "error", err)
-			}
-		}()
-		desktop.Start(*listenAddress, *configDirectory, *uiDirectory)
-		stop()
-		<-schedulerDone
-	} else {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("gateway stopped", "error", err)
-			os.Exit(1)
+		address := *listenAddress
+		select {
+		case address = <-boundAddress:
+		case <-shutdownContext.Done():
 		}
-		<-schedulerDone
+		desktop.Start(address, *configDirectory, *uiDirectory)
+		stop()
+	}
+	if err := <-runDone; err != nil {
+		slog.Error("gateway stopped", "error", err)
+		os.Exit(1)
 	}
 	if restartRequested.Load() {
-		// Release the ownership lock before starting the replacement process.
-		// The deferred Close remains safe and handles the ordinary exit path.
-		app.Close()
-		if executable, executableErr := os.Executable(); executableErr == nil {
-			command := exec.Command(executable, os.Args[1:]...)
-			command.Stdout, command.Stderr, command.Stdin = os.Stdout, os.Stderr, os.Stdin
-			if startErr := command.Start(); startErr != nil {
-				slog.Error("restart failed", "error", startErr)
-			}
+		if err := service.Restart(context.Background()); err != nil {
+			slog.Error("restart failed", "error", err)
 		}
 	}
 }

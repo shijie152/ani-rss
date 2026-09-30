@@ -54,12 +54,21 @@ func Stop() { systray.Quit() }
 func portFromListenAddress(value string) string {
 	value = strings.TrimSpace(value)
 	if _, port, err := netSplitHostPort(value); err == nil {
-		return port
+		return usablePort(port)
 	}
 	if index := strings.LastIndexByte(value, ':'); index >= 0 {
-		return strings.Trim(value[index+1:], "[]")
+		return usablePort(strings.Trim(value[index+1:], "[]"))
 	}
 	return ""
+}
+
+// usablePort 过滤掉 "0"：那是「让内核挑端口」的请求，不是可以拿去拼 URL 的
+// 真实端口。调用方应改用实际绑定的地址（bootstrap 的 OnListening）。
+func usablePort(port string) string {
+	if port == "" || port == "0" {
+		return ""
+	}
+	return port
 }
 
 // Kept as a small wrapper so the GUI file has no platform-specific parsing.

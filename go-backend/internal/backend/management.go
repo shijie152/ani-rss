@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -679,13 +678,23 @@ func (a *App) update(w http.ResponseWriter, r *http.Request) {
 		// Start the replaced binary after the HTTP response has been returned;
 		// the old process is then safe to terminate and the UI can reconnect.
 		time.Sleep(500 * time.Millisecond)
-		if executable, executableErr := os.Executable(); executableErr == nil {
-			if command := exec.Command(executable, os.Args[1:]...); command.Start() == nil {
-				os.Exit(0)
-			}
+		if restartErr := a.restartAfterUpdate(context.Background()); restartErr != nil {
+			a.logger.Error("restart after update failed", "error", restartErr)
+			return
 		}
+		os.Exit(0)
 	}()
 	writeResult(w, http.StatusOK, nil, "更新成功, 正在重启...")
+}
+
+// restartAfterUpdate starts the replacement binary through the hook the
+// assembler wired (bootstrap). The handler must not build its own
+// exec.Command: the shutdown-before-restart order lives in one place.
+func (a *App) restartAfterUpdate(ctx context.Context) error {
+	if a.restart == nil {
+		return errors.New("no restart hook is wired")
+	}
+	return a.restart(ctx)
 }
 func (a *App) stop(w http.ResponseWriter, r *http.Request) {
 	statusText, queryErr := requiredQueryWithType(r, "status", "Integer")
