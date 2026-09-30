@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
@@ -30,7 +31,7 @@ type Options struct {
 	// Cache is shared by clients created for separate HTTP requests. The
 	// backend creates a new Client per request so configuration snapshots stay
 	// current; the cache keeps upstream responses reusable across those clients.
-	Cache *Cache
+	Cache *cache.Cache[[]byte]
 	// Background schedules stale-while-revalidate work. It is optional for
 	// standalone source-client users and tests.
 	Background func(func())
@@ -54,8 +55,7 @@ type runtime struct {
 	httpClient                                                *http.Client
 	subscriptions                                             func() []model.Ani
 	retries                                                   int
-	cache                                                     *Cache
-	background                                                func(func())
+	cache                                                     *cache.Cache[[]byte]
 	metadataClient                                            *metadata.Client
 	context                                                   context.Context
 }
@@ -73,6 +73,9 @@ func newRuntime(options Options) *runtime {
 	if requestContext == nil {
 		requestContext = context.Background()
 	}
+	if options.Cache != nil && options.Background != nil {
+		options.Cache.WithBackground(options.Background)
+	}
 	return &runtime{
 		mikanHost:      strings.TrimRight(options.MikanHost, "/"),
 		aniBTHost:      strings.TrimRight(options.AniBTHost, "/"),
@@ -84,7 +87,6 @@ func newRuntime(options Options) *runtime {
 		subscriptions:  options.Subscriptions,
 		retries:        retries,
 		cache:          options.Cache,
-		background:     options.Background,
 		metadataClient: options.Metadata,
 		context:        requestContext,
 	}
@@ -101,16 +103,7 @@ func (c *runtime) cachedJSON(key string, freshFor, staleFor time.Duration, loade
 	if c.cache == nil {
 		return loader(c.context)
 	}
-	if raw, state := c.cache.lookup(key, freshFor, staleFor); state != cacheMiss {
-		var value any
-		if err := json.Unmarshal(raw, &value); err == nil {
-			if state == cacheStale {
-				_ = c.cache.refreshContext(key, load, c.context, c.background)
-			}
-			return value, nil
-		}
-	}
-	raw, err := c.cache.loadContext(key, load, c.context)
+	raw, _, err := c.cache.Get(c.context, key, freshFor, staleFor, load)
 	if err != nil {
 		return nil, err
 	}

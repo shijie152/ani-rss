@@ -5,14 +5,16 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 )
 
 func TestRuntimeCachedJSONServesStaleAndRefreshesInBackground(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	cache := newCacheWithClock(4, func() time.Time { return now })
+	cached := cache.New[[]byte](4, func() time.Time { return now })
 	var scheduled func()
 	runtime := newRuntime(Options{
-		Cache:      cache,
+		Cache:      cached,
 		Context:    context.Background(),
 		Background: func(fn func()) { scheduled = fn },
 	})
@@ -45,9 +47,9 @@ func TestRuntimeCachedJSONServesStaleAndRefreshesInBackground(t *testing.T) {
 
 func TestRuntimeCachedJSONKeepsOldValueWhenRefreshFails(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	cache := newCacheWithClock(4, func() time.Time { return now })
+	cached := cache.New[[]byte](4, func() time.Time { return now })
 	var scheduled func()
-	runtime := newRuntime(Options{Cache: cache, Background: func(fn func()) { scheduled = fn }})
+	runtime := newRuntime(Options{Cache: cached, Background: func(fn func()) { scheduled = fn }})
 	if _, err := runtime.cachedJSON("catalog", time.Hour, 3*time.Hour, func(context.Context) (any, error) {
 		return map[string]any{"value": "old"}, nil
 	}); err != nil {

@@ -44,8 +44,7 @@ func TestCacheDeduplicatesConcurrentLoadsAndReturnsIndependentValues(t *testing.
 
 func TestCacheServesStaleWhileRefreshFailureKeepsPreviousValue(t *testing.T) {
 	now := time.Unix(100, 0)
-	cache := NewCache(4)
-	cache.now = func() time.Time { return now }
+	cache := newCacheWithClock(4, func() time.Time { return now })
 	if _, err := cache.JSON("https://metadata.test/v0/subjects/2", func() (map[string]any, error) {
 		return map[string]any{"value": "original"}, nil
 	}); err != nil {
@@ -73,8 +72,7 @@ func TestCacheServesStaleWhileRefreshFailureKeepsPreviousValue(t *testing.T) {
 
 func TestCacheStaleRefreshPublishesOnlyAfterBackgroundWorkFinishes(t *testing.T) {
 	now := time.Unix(100, 0)
-	cache := NewCache(4)
-	cache.now = func() time.Time { return now }
+	cache := newCacheWithClock(4, func() time.Time { return now })
 	var scheduled func()
 	cache.WithBackground(func(fn func()) { scheduled = fn })
 	if _, err := cache.JSON("https://metadata.test/v0/subjects/3", func() (map[string]any, error) {
@@ -114,8 +112,7 @@ func TestCacheStaleRefreshPublishesOnlyAfterBackgroundWorkFinishes(t *testing.T)
 
 func TestCacheRefreshUsesContextWithoutCallerCancellation(t *testing.T) {
 	now := time.Unix(100, 0)
-	cache := NewCache(4)
-	cache.now = func() time.Time { return now }
+	cache := newCacheWithClock(4, func() time.Time { return now })
 	var scheduled func()
 	cache.WithBackground(func(fn func()) { scheduled = fn })
 	if _, err := cache.JSON("https://metadata.test/v0/subjects/4", func() (map[string]any, error) {

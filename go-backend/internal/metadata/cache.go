@@ -4,48 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 )
 
-type cacheEntry struct {
-	value      []byte
-	fetchedAt  time.Time
-	lastAccess time.Time
-}
-
-type cacheCall struct {
-	done  chan struct{}
-	value []byte
-	err   error
-}
-
-// Cache is a bounded stale-while-revalidate cache for metadata responses.
-// Search responses expire sooner than subject/details; callers choose policy
-// by key prefix while the cache keeps transport concerns centralized.
+// Cache is the metadata-facing view of the shared cache module: it owns the
+// per-key freshness policy while eviction, coalescing and background refresh
+// stay in the shared implementation.
 type Cache struct {
-	mu         sync.Mutex
-	entries    map[string]cacheEntry
-	calls      map[string]*cacheCall
-	maxEntries int
-	now        func() time.Time
-	background func(func())
+	values *cache.Cache[map[string]any]
 }
 
 func NewCache(maxEntries int) *Cache {
 	if maxEntries <= 0 {
 		maxEntries = 512
 	}
-	return &Cache{entries: map[string]cacheEntry{}, calls: map[string]*cacheCall{}, maxEntries: maxEntries, now: time.Now, background: func(fn func()) { go fn() }}
+	return &Cache{values: cache.New[map[string]any](maxEntries, nil)}
+}
+
+// newCacheWithClock lets tests drive the freshness windows without sleeping.
+func newCacheWithClock(maxEntries int, now func() time.Time) *Cache {
+	return &Cache{values: cache.New[map[string]any](maxEntries, now)}
 }
 
 // WithBackground lets an application-owned executor track stale refreshes
 // during shutdown. A nil callback restores the default goroutine executor.
 func (c *Cache) WithBackground(run func(func())) *Cache {
-	if run == nil {
-		run = func(fn func()) { go fn() }
-	}
-	c.background = run
+	c.values.WithBackground(run)
 	return c
 }
 
@@ -63,26 +49,34 @@ func (c *Cache) JSONContext(ctx context.Context, key string, loader func(context
 		ctx = context.Background()
 	}
 	fresh, stale := policy(key)
-	if value, ok, isStale := c.lookup(key, fresh, stale); ok {
-		if isStale {
-			c.refresh(key, func() (map[string]any, error) {
-				return loader(context.WithoutCancel(ctx))
-			})
+	value, _, err := c.values.Get(ctx, key, fresh, stale, func(loadCtx context.Context) (map[string]any, error) {
+		loaded, loadErr := loader(loadCtx)
+		if loadErr != nil {
+			return nil, loadErr
 		}
-		return value, nil
+		// Cached metadata is shared across requests: hand every caller its own
+		// copy so a caller mutating the result cannot corrupt the cache.
+		return clone(loaded), nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	call, owner := c.begin(key)
-	if !owner {
-		<-call.done
-		return decode(call.value, call.err)
+	return clone(value), nil
+}
+
+func clone(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
 	}
-	value, err := loader(ctx)
-	var raw []byte
-	if err == nil {
-		raw, err = json.Marshal(value)
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return value
 	}
-	c.finish(key, call, raw, err)
-	return decode(raw, err)
+	var copied map[string]any
+	if err := json.Unmarshal(raw, &copied); err != nil {
+		return value
+	}
+	return copied
 }
 
 func policy(key string) (time.Duration, time.Duration) {
@@ -93,88 +87,4 @@ func policy(key string) (time.Duration, time.Duration) {
 		return 6 * time.Hour, 7 * 24 * time.Hour
 	}
 	return time.Hour, 24 * time.Hour
-}
-
-func (c *Cache) lookup(key string, fresh, stale time.Duration) (map[string]any, bool, bool) {
-	c.mu.Lock()
-	entry, ok := c.entries[key]
-	if ok {
-		age := c.now().Sub(entry.fetchedAt)
-		if age < 0 {
-			age = 0
-		}
-		if age < stale {
-			entry.lastAccess = c.now()
-			c.entries[key] = entry
-			c.mu.Unlock()
-			value, err := decode(entry.value, nil)
-			return value, err == nil, age >= fresh
-		}
-		delete(c.entries, key)
-	}
-	c.mu.Unlock()
-	return nil, false, false
-}
-
-func decode(raw []byte, err error) (map[string]any, error) {
-	if err != nil {
-		return nil, err
-	}
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
-func (c *Cache) begin(key string) (*cacheCall, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if call, ok := c.calls[key]; ok {
-		return call, false
-	}
-	call := &cacheCall{done: make(chan struct{})}
-	c.calls[key] = call
-	return call, true
-}
-
-func (c *Cache) finish(key string, call *cacheCall, value []byte, err error) {
-	call.value, call.err = append([]byte(nil), value...), err
-	c.mu.Lock()
-	if err == nil && len(value) > 0 {
-		now := c.now()
-		c.entries[key] = cacheEntry{value: append([]byte(nil), value...), fetchedAt: now, lastAccess: now}
-		for len(c.entries) > c.maxEntries {
-			oldestKey := ""
-			var oldest time.Time
-			for candidate, entry := range c.entries {
-				if oldestKey == "" || entry.lastAccess.Before(oldest) {
-					oldestKey, oldest = candidate, entry.lastAccess
-				}
-			}
-			delete(c.entries, oldestKey)
-		}
-	}
-	delete(c.calls, key)
-	close(call.done)
-	c.mu.Unlock()
-}
-
-func (c *Cache) refresh(key string, loader func() (map[string]any, error)) {
-	call, owner := c.begin(key)
-	if !owner {
-		return
-	}
-	run := c.background
-	if run == nil {
-		run = func(fn func()) { go fn() }
-	}
-	run(func() {
-		value, err := loader()
-		var raw []byte
-		if err == nil {
-			raw, err = json.Marshal(value)
-		}
-		c.finish(key, call, raw, err)
-	})
 }
