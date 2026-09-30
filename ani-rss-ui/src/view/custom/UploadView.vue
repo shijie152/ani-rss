@@ -63,7 +63,8 @@ let uploadFile = async (file) => {
   const formData = new FormData();
   formData.append("file", file)
 
-  return await api.post(props.url, formData);
+  // 上传大文件（zip/媒体）可能远超 30 秒，不套用请求层的默认超时。
+  return await api.post(props.url, formData, {timeout: 0});
 }
 
 let changeFile = () => {

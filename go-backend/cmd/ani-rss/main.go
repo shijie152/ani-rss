@@ -69,8 +69,14 @@ func main() {
 	go func() { runDone <- service.Run(shutdownContext) }()
 	if *gui {
 		address := *listenAddress
+		// Run 可能在绑定端口时失败（端口被占用等），那时 boundAddress 永远不来；
+		// 必须同时等 runDone，否则托盘模式会永久挂起。
+		var runErr error
 		select {
 		case address = <-boundAddress:
+		case runErr = <-runDone:
+			slog.Error("gateway failed to start", "error", runErr)
+			os.Exit(1)
 		case <-shutdownContext.Done():
 		}
 		desktop.Start(address, *configDirectory, *uiDirectory)

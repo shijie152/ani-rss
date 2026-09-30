@@ -52,3 +52,18 @@ test('failed requests surface a toast by default', async () => {
 test('silent requests reject without a toast', async () => {
   assert.deepEqual(await status({silent: true}), {result: 'error', toasts: []})
 })
+
+// 上传大文件走 timeout: 0：不能套用默认 30 秒超时，否则大 zip/媒体会被中断。
+test('timeout zero disables the request timeout', async () => {
+  let aborted = false
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener('abort', () => {
+      aborted = true
+      reject(new DOMException('请求超时', 'TimeoutError'))
+    })
+  })
+  const pending = api.post('api/upload', undefined, {timeout: 0, silent: true}).catch(() => 'rejected')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(aborted, false, 'timeout: 0 must not schedule an abort')
+  void pending
+})

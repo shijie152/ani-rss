@@ -23,7 +23,10 @@ const makeSignal = (externalSignal, timeout) => {
         if (externalSignal.aborted) abort()
         else externalSignal.addEventListener('abort', abort, {once: true})
     }
-    timer = window.setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), timeout)
+    // timeout 为 0 表示不设超时（上传大文件用），负值同样按不设处理。
+    if (timeout > 0) {
+        timer = window.setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), timeout)
+    }
     return {
         signal: controller.signal,
         cleanup: () => {

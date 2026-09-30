@@ -73,6 +73,8 @@ func newRuntime(options Options) *runtime {
 	if requestContext == nil {
 		requestContext = context.Background()
 	}
+	// 缓存的 executor 只在这里接一次（WithBackground 内部加锁且幂等）：
+	// 旧实现每个请求都重新构造 client 并重复设置，并发下构成数据竞争。
 	if options.Cache != nil && options.Background != nil {
 		options.Cache.WithBackground(options.Background)
 	}
@@ -98,7 +100,13 @@ func (c *runtime) cachedJSON(key string, freshFor, staleFor time.Duration, loade
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(value)
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		// 缓存是通用的，不会为 []byte 做深拷贝；这里交出独立副本，
+		// 避免调用方后续改动这个切片污染缓存。
+		return append([]byte(nil), raw...), nil
 	}
 	if c.cache == nil {
 		return loader(c.context)

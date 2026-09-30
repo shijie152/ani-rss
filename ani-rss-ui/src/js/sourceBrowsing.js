@@ -8,19 +8,22 @@ export const sourceAdapters = {
   mikan: {
     type: 'mikan',
     subjectId: item => new URL(item.rss).searchParams.get('bangumiId'),
-    subgroupLabel: item => item.label
+    subgroupLabel: item => item.label,
+    groupEndpoint: 'mikanGroup'
   },
   'ani-bt': {
     type: 'ani-bt',
     subjectId: item => new URL(item.rss).searchParams.get('bgmId'),
     subgroupLabel: item => item.name,
-    bgmUrl: subject => `https://bgm.tv/subject/${subject}`
+    bgmUrl: subject => `https://bgm.tv/subject/${subject}`,
+    groupEndpoint: 'aniBTGroup'
   },
   'anime-garden': {
     type: 'anime-garden',
     subjectId: item => item.bgmId,
     subgroupLabel: item => item.name,
-    bgmUrl: subject => `https://bgm.tv/subject/${subject}`
+    bgmUrl: subject => `https://bgm.tv/subject/${subject}`,
+    groupEndpoint: 'animeGardenGroup'
   }
 }
 
@@ -47,12 +50,12 @@ const buildSubscription = (items, adapter) => {
     match: [],
     type: adapter.type
   }
-  const bgmUrl = adapter.bgmUrl
-      ? adapter.bgmUrl(adapter.subjectId(primary))
-      : primary.bgmUrl
-  if (bgmUrl) subscription.bgmUrl = bgmUrl
-  const subgroup = adapter.subgroupLabel(primary)
-  if (subgroup) subscription.subgroup = subgroup
+  // 只有声明了 bgmUrl 的源站才在草稿里带上 bgmUrl/subgroup：Mikan 刻意不带，
+  // 后端只有两者都为空时才去解析详情页（见 source/mikan.go），带上会跳过那段解析。
+  if (adapter.bgmUrl) {
+    subscription.bgmUrl = adapter.bgmUrl(adapter.subjectId(primary))
+    subscription.subgroup = adapter.subgroupLabel(primary)
+  }
   if (standby.length > 0) {
     subscription.standbyRssList = standby.map(item => ({
       label: adapter.subgroupLabel(item),
@@ -65,6 +68,38 @@ const buildSubscription = (items, adapter) => {
 
 // resolve 把订阅草稿补成完整番剧（对应 rssToAni），add 落库（对应 addAni），
 // onProgress 汇报已完成条数，供批量添加弹窗显示进度。
+// 展开字幕组：三个源站页各写一份，只差调用的端点。收进这里，视图只给 load 与回调。
+export const createSubgroupLoader = ({load, onLoading} = {}) => {
+  const groups = new Map()
+  const loading = new Set()
+  const inflight = new Map()
+  return {
+    // 已加载过的字幕组直接复用，避免重复请求（旧实现用 groups.value[v] 判断）。
+    has: key => groups.has(key),
+    isLoading: key => loading.has(key),
+    get: key => groups.get(key),
+    load: async key => {
+      if (groups.has(key)) return groups.get(key)
+      if (inflight.has(key)) return inflight.get(key)
+      loading.add(key)
+      onLoading?.(true, key)
+      const task = Promise.resolve()
+          .then(() => load(key))
+          .then(value => {
+            groups.set(key, value)
+            return value
+          })
+          .finally(() => {
+            loading.delete(key)
+            inflight.delete(key)
+            onLoading?.(false, key)
+          })
+      inflight.set(key, task)
+      return task
+    }
+  }
+}
+
 export const submitBatch = async (items, adapter, {resolve, add, onProgress} = {}) => {
   const grouped = groupBySubject(items, adapter)
   let done = 0

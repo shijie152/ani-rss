@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {readFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {copyText, sourceAdapters, submitBatch} from './sourceBrowsing.js'
+import {copyText, createSubgroupLoader, sourceAdapters, submitBatch} from './sourceBrowsing.js'
 
 // 直接测视图用的那一份 adapter，而不是在测试里另抄一份。
 const mikanAdapter = sourceAdapters.mikan
@@ -101,6 +101,63 @@ test('every source has an adapter defined in the module', () => {
     assert.equal(adapter.type, name, name + '.type')
     assert.equal(typeof adapter.subjectId, 'function', name + '.subjectId')
     assert.equal(typeof adapter.subgroupLabel, 'function', name + '.subgroupLabel')
+  }
+})
+
+// Mikan 的批量添加草稿刻意不带 bgmUrl/subgroup：后端只有两者都为空时才去
+// 解析 Mikan 详情页；带上会静默跳过那段解析（见 source/mikan.go 的注释）。
+// 字幕组加载器：三个源站页共用，重复展开同一个字幕组不能再发请求。
+test('subgroup loader caches results and reports loading state', async () => {
+  const states = []
+  let calls = 0
+  const loader = createSubgroupLoader({
+    load: async url => { calls++; return {url} },
+    onLoading: value => states.push(value)
+  })
+
+  const first = await loader.load('https://mikan.example/g1')
+  const second = await loader.load('https://mikan.example/g1')
+
+  assert.equal(calls, 1)
+  assert.deepEqual(first, second)
+  assert.equal(loader.has('https://mikan.example/g1'), true)
+  assert.deepEqual(states, [true, false])
+})
+
+test('subgroup loader coalesces concurrent loads of the same key', async () => {
+  let calls = 0
+  let release
+  const loader = createSubgroupLoader({
+    load: () => { calls++; return new Promise(resolve => { release = resolve }) }
+  })
+  const a = loader.load('u')
+  const b = loader.load('u')
+  // load 在微任务里才被调用，先让出一次事件循环让 release 就位。
+  await Promise.resolve()
+  release({ok: true})
+  assert.deepEqual(await a, {ok: true})
+  assert.deepEqual(await b, {ok: true})
+  assert.equal(calls, 1)
+})
+
+test('mikan drafts omit bgmUrl and subgroup so the backend resolves the detail page', async () => {
+  const drafts = await draftsFor([
+    {rss: 'https://mikan.example/RSS/Bangumi?bangumiId=1', label: '字幕组A'}
+  ], mikanAdapter)
+
+  assert.equal(drafts[0].bgmUrl, undefined)
+  assert.equal(drafts[0].subgroup, undefined)
+  assert.equal(drafts[0].type, 'mikan')
+})
+
+test('ani-bt and anime-garden drafts do carry bgmUrl and subgroup', async () => {
+  for (const adapter of [aniBTAdapter, sourceAdapters['anime-garden']]) {
+    const drafts = await draftsFor(
+      [{rss: 'https://source.example/rss?bgmId=7', bgmId: 7, name: '字幕组X'}],
+      adapter
+    )
+    assert.equal(drafts[0].bgmUrl, 'https://bgm.tv/subject/7', adapter.type)
+    assert.equal(drafts[0].subgroup, '字幕组X', adapter.type)
   }
 })
 

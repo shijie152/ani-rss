@@ -292,6 +292,12 @@ const loadMikan = async (force = false) => {
       cacheUpdatedAt.value = result.savedAt
       return
     }
+    // 命中新鲜缓存时也要显示缓存时间，否则「缓存于 HH:MM」提示消失。
+    if (result.source === 'cache' && result.data) {
+      applyCached({data: result.data})
+      cacheUpdatedAt.value = result.savedAt
+      return
+    }
     if (result.data) {
       applyCached(result)
     }
@@ -334,6 +340,11 @@ const loadAniBT = async (force = false) => {
       fetch: async () => (await http.aniBT(aniBTFollowsCurrent.value ? '' : aniBTSeason.value, '', '')).data || {}
     })
     if (result.source === 'stale' && result.data) {
+      applyCached({data: result.data})
+      cacheUpdatedAt.value = result.savedAt
+      return
+    }
+    if (result.source === 'cache' && result.data) {
       applyCached({data: result.data})
       cacheUpdatedAt.value = result.savedAt
       return

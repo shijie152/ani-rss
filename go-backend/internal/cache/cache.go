@@ -33,8 +33,10 @@ type call[T any] struct {
 	err   error
 }
 
-// Cache is a bounded process-local cache. Values are copied on the way in and
-// out when the type is a byte slice, so callers never share mutable state.
+// Cache is a bounded process-local cache with stale-while-revalidate and
+// single-flight semantics. Values are stored as given: the package is generic
+// and cannot deep-copy an arbitrary T, so callers that store mutable values
+// (slices, maps) must copy on the way in if the value can change afterwards.
 type Cache[T any] struct {
 	mu         sync.Mutex
 	entries    map[string]entry[T]
@@ -65,7 +67,9 @@ func New[T any](maxEntries int, now func() time.Time) *Cache[T] {
 // WithBackground lets an application-owned executor track stale refreshes
 // instead of spawning bare goroutines.
 func (c *Cache[T]) WithBackground(run func(func())) *Cache[T] {
+	c.mu.Lock()
 	c.background = run
+	c.mu.Unlock()
 	return c
 }
 
@@ -180,7 +184,9 @@ func (c *Cache[T]) refresh(ctx context.Context, key string, load func(context.Co
 	if !owner {
 		return false
 	}
+	c.mu.Lock()
 	background := c.background
+	c.mu.Unlock()
 	if background == nil {
 		background = func(fn func()) { go fn() }
 	}
