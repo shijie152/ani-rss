@@ -72,6 +72,7 @@ import {init} from "@/js/global.js";
 import api from "@/js/api.js";
 import * as http from "@/js/http.js";
 import {withQuery} from "@/js/requestUtils.js";
+import {endpointPath} from "@/js/endpoints.js";
 
 const type = ref('success')
 const text = ref('')
@@ -91,7 +92,7 @@ const loadMe = async () => {
 
 const load = async (code) => {
   loading.value = true
-  api.post(withQuery('api/bgm/oauth/callback', {code}))
+  api.post(withQuery(endpointPath('bgmOAuthCallback'), {code}))
       .then(async res => {
         let {code, message} = res
         type.value = code === 200 ? 'success' : 'error'
