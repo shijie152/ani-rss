@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
 )
@@ -720,11 +721,11 @@ func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *test
 	}))
 	defer server.Close()
 
-	cache := source.NewCache(16)
+	cached := cache.New[[]byte](16, nil)
 	client := source.New(source.Options{
 		MikanHost: server.URL,
 		AniBTHost: server.URL,
-		Cache:     cache,
+		Cache:     cached,
 		Subscriptions: func() []model.Ani {
 			if !subscribed.Load() {
 				return nil
@@ -735,7 +736,7 @@ func TestSourceCatalogCacheReusesUpstreamAndRefreshesSubscriptionMarkers(t *test
 			}
 		},
 	})
-	var discovery source.Discovery = client
+	var discovery source.CatalogueDiscovery = client
 
 	firstMikan, err := discovery.Mikan("demo", nil)
 	if err != nil {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/auth"
+	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 	"github.com/shijie152/ani-rss/go-backend/internal/collection"
 	"github.com/shijie152/ani-rss/go-backend/internal/completion"
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
@@ -46,10 +47,13 @@ import (
 )
 
 type Options struct {
-	ConfigDir        string
-	Version          string
-	UpdateEndpoint   string
-	Shutdown         func(bool)
+	ConfigDir      string
+	Version        string
+	UpdateEndpoint string
+	Shutdown       func(bool)
+	// Restart starts a replacement process with the same arguments. The
+	// update handler calls it instead of assembling exec.Command itself.
+	Restart          func(context.Context) error
 	Logger           *slog.Logger
 	OwnershipDomains []string
 	MCPEnabled       bool
@@ -67,11 +71,12 @@ type App struct {
 	configDir     string
 	logger        *slog.Logger
 	notifications *notification.Dispatcher
-	sourceCache   *source.Cache
+	sourceCache   *cache.Cache[[]byte]
 	metadataCache *metadata.Cache
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
 	backgroundWG  sync.WaitGroup
+	closeOnce     sync.Once
 	schedulerMu   sync.Mutex
 	schedulerWG   sync.WaitGroup
 	schedulerStop context.CancelFunc
@@ -83,6 +88,7 @@ type App struct {
 	swagger       bool
 	updater       *update.Client
 	shutdown      func(bool)
+	restart       func(context.Context) error
 }
 
 var titleYearSuffix = regexp.MustCompile(`\s*\((?:19|20)\d{2}\)\s*$`)
@@ -144,11 +150,11 @@ func New(options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: source.NewCache(256), metadataCache: metadata.NewCache(512), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: cache.New[[]byte](256, nil), metadataCache: metadata.NewCache(512), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown, restart: options.Restart}
 	app.metadataCache.WithBackground(app.runBackground)
 	app.logger.Info("Go backend initialized")
 	app.subscriptions.ConfigureSideEffects(func(ctx context.Context) (subscription.TaskManager, error) {
-		coordinator, factoryErr := app.newCoordinator()
+		coordinator, factoryErr := app.Components().Coordinator()
 		if factoryErr != nil {
 			return nil, factoryErr
 		}
@@ -158,7 +164,7 @@ func New(options Options) (*App, error) {
 		app.runBackground(func() {
 			app.refreshMu.Lock()
 			defer app.refreshMu.Unlock()
-			coordinator, coordinatorErr := app.newCoordinator()
+			coordinator, coordinatorErr := app.Components().Coordinator()
 			if coordinatorErr != nil {
 				app.logger.Warn("initial subscription refresh setup failed", "subscription", item.ID, "error", coordinatorErr)
 				return
@@ -204,6 +210,66 @@ func (a *App) Config() *appconfig.Manager { return a.config }
 func (a *App) Store() store.Store         { return a.store }
 func (a *App) Auth() *auth.Authenticator  { return a.auth }
 
+// Components exposes the assembly seam: the modules App builds from the
+// current configuration snapshot. Callers consume them instead of rebuilding
+// the same tree per request.
+func (a *App) Components() *components { return &components{app: a} }
+
+type components struct {
+	app *App
+}
+
+// Coordinator assembles the RSS coordinator for the current configuration.
+func (c *components) Coordinator() (*rss.Coordinator, error) {
+	app := c.app
+	cfg := app.config.Snapshot()
+	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	adapter, err := downloader.New(cfg, client)
+	if err != nil {
+		return nil, err
+	}
+	return &rss.Coordinator{Config: app.config, Subscriptions: app.subscriptions, History: app.history, HTTPClient: client, ConfigDir: app.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
+		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
+			return app.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
+		}}, nil
+}
+
+// MetadataClient assembles the metadata client for the current configuration.
+func (c *components) MetadataClient() (*metadata.Client, error) {
+	cfg := c.app.config.Snapshot()
+	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return metadata.New(cfg, client).WithCache(c.app.metadataCache), nil
+}
+
+// MediaService assembles the media service for the current configuration.
+func (c *components) MediaService() (*media.Service, error) {
+	return c.mediaService()
+}
+
+// CatalogueDiscovery returns the resource source client for callers that only
+// need season/week listings and subgroup details.
+func (c *components) CatalogueDiscovery(ctx context.Context) (source.CatalogueDiscovery, error) {
+	return c.sourceClientContext(ctx)
+}
+
+// BangumiMetadata returns the resource source client for callers that only
+// need metadata lookups.
+func (c *components) BangumiMetadata(ctx context.Context) (source.BangumiMetadata, error) {
+	return c.sourceClientContext(ctx)
+}
+
+// RSSResolver returns the resource source client for callers that only turn
+// feeds into subscription drafts.
+func (c *components) RSSResolver(ctx context.Context) (source.RSSResolver, error) {
+	return c.sourceClientContext(ctx)
+}
+
 // OwnedDomains returns the domains successfully claimed by this process.
 func (a *App) OwnedDomains() []string {
 	return append([]string(nil), a.ownedDomains...)
@@ -227,6 +293,12 @@ func (a *App) AcquireDomains(domains ...string) error {
 }
 
 func (a *App) Close() {
+	// Restart 与调用方的 defer 都会调用 Close；once 保证资源只释放一次，
+	// 并发调用时也不会同时关日志文件与存储。
+	a.closeOnce.Do(a.close)
+}
+
+func (a *App) close() {
 	a.schedulerMu.Lock()
 	if a.schedulerStop != nil {
 		a.schedulerStop()
@@ -388,7 +460,7 @@ func (a *App) repairLoadedSubscriptions(items []model.Ani) error {
 
 	// Java repairs every cover, including old records whose remote image was
 	// temporarily unavailable; RefreshCover supplies cover.png on failure.
-	if service, err := a.mediaService(); err == nil {
+	if service, err := a.Components().MediaService(); err == nil {
 		for index := range items {
 			cover, _ := service.RefreshCover(context.Background(), items[index].Image, false)
 			if cover != "" && items[index].Cover != cover {
@@ -467,7 +539,7 @@ func (a *App) prewarmSourceCatalogs() {
 }
 
 func (a *App) prewarmSourceCatalogsContext(ctx context.Context) {
-	client, err := a.sourceClientContext(ctx)
+	client, err := a.Components().CatalogueDiscovery(ctx)
 	if err != nil {
 		a.logger.Warn("source cache warm-up setup failed", "error", err)
 		return
@@ -816,7 +888,8 @@ func (a *App) updateTotalEpisodeNumber(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "未选择订阅")
 		return
 	}
-	client, err := a.sourceClient()
+	// 解析在响应返回后的后台任务里执行，必须用不受请求取消影响的 context。
+	client, err := a.Components().BangumiMetadata(context.Background())
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
@@ -871,17 +944,17 @@ func (a *App) downloadPath(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, path, "success")
 }
 
-func (a *App) sourceClient() (source.Discovery, error) {
-	return a.sourceClientContext(context.Background())
-}
-
-func (a *App) sourceClientContext(ctx context.Context) (source.Discovery, error) {
-	cfg := a.config.Snapshot()
+// sourceClientContext assembles the source client for the current
+// configuration. Callers take it through one of the purpose interfaces, so the
+// concrete client never leaks past this file.
+func (c *components) sourceClientContext(ctx context.Context) (*source.Client, error) {
+	app := c.app
+	cfg := app.config.Snapshot()
 	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	metadataClient := metadata.New(cfg, client).WithCache(a.metadataCache)
+	metadataClient := metadata.New(cfg, client).WithCache(app.metadataCache)
 	return source.New(source.Options{
 		Context:         ctx,
 		MikanHost:       appconfig.String(cfg, "mikanHost"),
@@ -892,9 +965,9 @@ func (a *App) sourceClientContext(ctx context.Context) (source.Discovery, error)
 		Config:          cfg,
 		HTTPClient:      client,
 		Retries:         appconfig.Int(cfg, "downloadRetry"),
-		Subscriptions:   a.subscriptions.Items,
-		Cache:           a.sourceCache,
-		Background:      a.runBackground,
+		Subscriptions:   app.subscriptions.Items,
+		Cache:           app.sourceCache,
+		Background:      app.runBackground,
 		Metadata:        metadataClient,
 	}), nil
 }
@@ -910,7 +983,7 @@ func (a *App) mikan(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "Mikan 参数格式异常: "+err.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result map[string]any
 		result, err = client.Mikan(text, season)
@@ -928,7 +1001,7 @@ func (a *App) mikanGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.MikanGroup(target)
@@ -946,7 +1019,7 @@ func (a *App) aniBT(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result map[string]any
 		result, err = client.AniBT(input)
@@ -964,7 +1037,7 @@ func (a *App) aniBTGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AniBTGroup(bgmID)
@@ -977,7 +1050,7 @@ func (a *App) aniBTGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) animeGardenList(w http.ResponseWriter, r *http.Request) {
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AnimeGardenList(r.URL.Query().Get("bgmUrl"))
@@ -995,7 +1068,7 @@ func (a *App) animeGardenGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().CatalogueDiscovery(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.AnimeGardenGroup(bgmID)
@@ -1013,7 +1086,7 @@ func (a *App) searchBgm(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().BangumiMetadata(r.Context())
 	if err == nil {
 		var result []map[string]any
 		result, err = client.SearchBangumi(name)
@@ -1031,14 +1104,14 @@ func (a *App) getAniBySubjectID(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, queryErr.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().BangumiMetadata(r.Context())
 	if err == nil {
 		var result model.Ani
 		result, err = client.SubscriptionFromSubject(id)
 		if err == nil {
 			a.enrichSubscriptionMetadata(r.Context(), &result)
 			a.applySubscriptionDefaults(&result, true)
-			if service, serviceErr := a.mediaService(); serviceErr == nil {
+			if service, serviceErr := a.Components().MediaService(); serviceErr == nil {
 				cover, _ := service.RefreshCover(r.Context(), result.Image, false)
 				result.Cover = cover
 			}
@@ -1055,7 +1128,7 @@ func (a *App) getBGMTitle(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().BangumiMetadata(r.Context())
 	if err == nil {
 		var result string
 		result, err = client.BGMTitle(item)
@@ -1083,7 +1156,7 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "RSS解析失败 RSS地址 不能为空")
 		return
 	}
-	client, err := a.sourceClientContext(r.Context())
+	client, err := a.Components().RSSResolver(r.Context())
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
@@ -1102,7 +1175,14 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "bgmUrl 不能为空")
 		return
 	}
-	item, err := client.SubscriptionFromSubject(id)
+	// 订阅草稿既来自 RSS 解析（RSSResolver），也来自 bgm 条目（BangumiMetadata）；
+	// 两个用途各自取用，不合成一个宽接口。
+	bangumi, bangumiErr := a.Components().BangumiMetadata(r.Context())
+	if bangumiErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, sourceError(bangumiErr))
+		return
+	}
+	item, err := bangumi.SubscriptionFromSubject(id)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 		return
@@ -1127,7 +1207,7 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 	if appconfig.Bool(a.config.Snapshot(), "copyMasterToStandby") && appconfig.Bool(a.config.Snapshot(), "standbyRss") {
 		item.StandbyRSSList = append(item.StandbyRSSList, model.StandbyRSS{Label: item.Subgroup, URL: strings.TrimSpace(item.URL), Offset: 0})
 	}
-	if service, serviceErr := a.mediaService(); serviceErr == nil {
+	if service, serviceErr := a.Components().MediaService(); serviceErr == nil {
 		// RefreshCover returns Java's fallback path even when downloading the
 		// remote image fails. Keep that path in the response so the edit form
 		// never receives an empty cover field.
@@ -1295,7 +1375,7 @@ func (a *App) enrichSubscriptionMetadata(ctx context.Context, item *model.Ani) {
 	if searchTitle == "" {
 		searchTitle = "无标题"
 	}
-	metadataClient, err := a.metadataClient()
+	metadataClient, err := a.Components().MetadataClient()
 	if err != nil {
 		item.Title = bangumiFallback
 		return
@@ -1370,22 +1450,6 @@ func dateYear(value string) int {
 	return year
 }
 
-func (a *App) newCoordinator() (*rss.Coordinator, error) {
-	cfg := a.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	adapter, err := downloader.New(cfg, client)
-	if err != nil {
-		return nil, err
-	}
-	return &rss.Coordinator{Config: a.config, Subscriptions: a.subscriptions, History: a.history, HTTPClient: client, ConfigDir: a.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
-		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
-			return a.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
-		}}, nil
-}
-
 func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
 	a.runBackground(func() {
 		if err := a.refreshAllSubscriptions(context.Background()); err != nil {
@@ -1426,7 +1490,7 @@ func (a *App) refreshAni(w http.ResponseWriter, r *http.Request) {
 func (a *App) refreshAllSubscriptions(ctx context.Context) error {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
-	coordinator, err := a.newCoordinator()
+	coordinator, err := a.Components().Coordinator()
 	if err != nil {
 		return err
 	}
@@ -1437,7 +1501,7 @@ func (a *App) refreshAllSubscriptions(ctx context.Context) error {
 func (a *App) refreshSubscription(ctx context.Context, item model.Ani) error {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
-	coordinator, err := a.newCoordinator()
+	coordinator, err := a.Components().Coordinator()
 	if err != nil {
 		return err
 	}
@@ -1455,7 +1519,7 @@ func (a *App) previewAni(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "RSS地址不能为空")
 		return
 	}
-	coordinator, err := a.newCoordinator()
+	coordinator, err := a.Components().Coordinator()
 	if err == nil {
 		var result map[string]any
 		result, err = coordinator.PreviewResult(r.Context(), item)
@@ -1530,7 +1594,7 @@ func (a *App) torrentsInfos(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusOK, []model.Torrent{}, "success")
 		return
 	}
-	coordinator, err := a.newCoordinator()
+	coordinator, err := a.Components().Coordinator()
 	if err == nil {
 		if err = coordinator.QB.Login(r.Context()); err == nil {
 			var result []model.Torrent
@@ -1746,11 +1810,11 @@ func (a *App) renameInterval() time.Duration {
 // runCompletionPass executes one download-completion cycle against the
 // currently configured downloader. It is reached only through the scheduler.
 func (a *App) runCompletionPass(ctx context.Context) error {
-	coordinator, err := a.newCoordinator()
+	coordinator, err := a.Components().Coordinator()
 	if err != nil {
 		return err
 	}
-	scraper, err := a.mediaService()
+	scraper, err := a.Components().MediaService()
 	if err != nil {
 		return err
 	}
@@ -1764,31 +1828,29 @@ func (a *App) runCompletionPass(ctx context.Context) error {
 			return a.notifications.Dispatch(nctx, notification.Event{Ani: ev.Ani, Status: ev.Status, Text: ev.Text, Path: ev.Path, Resource: ev.Resource})
 		},
 	}
-	// Wire the optional in-downloader rename (Java DOWNLOAD.rename). Only
-	// adapters that can enumerate task files provide the seams; others leave
-	// them nil and the pass skips the step.
-	if lister, ok := coordinator.QB.(interface {
-		Files(context.Context, string) ([]downloader.TorrentFile, error)
-	}); ok {
+	// Wire the optional in-downloader rename (Java DOWNLOAD.rename). The
+	// capability probe lives in the downloader module; adapters that cannot
+	// enumerate task files leave the seams nil and the pass skips the step.
+	capabilities := downloader.Capabilities(coordinator.QB)
+	if capabilities.ListFiles != nil {
+		// completion 与 downloader 是两个 module，形状转换留在这里：
+		// 显式逐字段，结构体加字段时不会静默错位。
 		pass.ListFiles = func(ctx context.Context, hash string) ([]completion.TaskFile, error) {
-			files, err := lister.Files(ctx, hash)
+			files, err := capabilities.ListFiles(ctx, hash)
 			out := make([]completion.TaskFile, 0, len(files))
-			for _, f := range files {
-				out = append(out, completion.TaskFile{Index: f.Index, Name: f.Name, Size: f.Size, Priority: f.Priority})
+			for _, file := range files {
+				out = append(out, completion.TaskFile{
+					Index:    file.Index,
+					Name:     file.Name,
+					Size:     file.Size,
+					Priority: file.Priority,
+				})
 			}
 			return out, err
 		}
 	}
-	if renamer, ok := coordinator.QB.(interface {
-		RenameFile(context.Context, string, string, string) error
-	}); ok {
-		pass.RenameFileInTask = renamer.RenameFile
-	}
-	if prio, ok := coordinator.QB.(interface {
-		SetFilePriority(context.Context, string, int, int) error
-	}); ok {
-		pass.SetPriority = prio.SetFilePriority
-	}
+	pass.RenameFileInTask = capabilities.RenameFileInTask
+	pass.SetPriority = capabilities.SetPriority
 	return pass.Run(ctx)
 }
 
@@ -1803,38 +1865,30 @@ func (m mediaScraper) Scrape(ctx context.Context, ani *model.Ani, force bool) (c
 	return completion.ScrapeResult{Processed: result.Processed, Path: result.Path}, err
 }
 
-func (a *App) metadataClient() (*metadata.Client, error) {
-	cfg := a.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+func (c *components) mediaService() (*media.Service, error) {
+	app := c.app
+	client, err := c.MetadataClient()
 	if err != nil {
 		return nil, err
 	}
-	return metadata.New(cfg, client).WithCache(a.metadataCache), nil
-}
-
-func (a *App) mediaService() (*media.Service, error) {
-	client, err := a.metadataClient()
-	if err != nil {
-		return nil, err
-	}
-	cfg := a.config.Snapshot()
+	cfg := app.config.Snapshot()
 	requestClient, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	service := media.New(a.config, client, requestClient, func(item model.Ani) (string, error) {
-		value, pathErr := a.subscriptions.DownloadPath(item)
+	service := media.New(app.config, client, requestClient, func(item model.Ani) (string, error) {
+		value, pathErr := app.subscriptions.DownloadPath(item)
 		if pathErr != nil {
 			return "", pathErr
 		}
 		return value["downloadPath"].(string), nil
 	})
 	service.ResolveOther = func(item model.Ani, template string) (string, error) {
-		return a.subscriptions.DownloadPathWithTemplate(item, template)
+		return app.subscriptions.DownloadPathWithTemplate(item, template)
 	}
-	service.ConfigDir = a.configDir
+	service.ConfigDir = app.configDir
 	service.Notify = func(ctx context.Context, item model.Ani, path, status string) error {
-		return a.notifications.Dispatch(ctx, notification.Event{Ani: item, Status: status, Text: "下载完成: " + item.Title, Path: path})
+		return app.notifications.Dispatch(ctx, notification.Event{Ani: item, Status: status, Text: "下载完成: " + item.Title, Path: path})
 	}
 	return service, nil
 }
@@ -1855,7 +1909,7 @@ func (a *App) scrape(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "强制参数异常")
 		return
 	}
-	service, err := a.mediaService()
+	service, err := a.Components().MediaService()
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -1894,7 +1948,7 @@ func (a *App) batchScrape(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "未选择订阅")
 		return
 	}
-	service, err := a.mediaService()
+	service, err := a.Components().MediaService()
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -1931,7 +1985,7 @@ func (a *App) refreshCover(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	service, err := a.mediaService()
+	service, err := a.Components().MediaService()
 	if err == nil {
 		var cover string
 		cover, err = service.RefreshCover(r.Context(), item.Image, true)
@@ -2070,7 +2124,7 @@ func (a *App) getThemoviedbName(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "TmdbId 或 标题 不能为空")
 		return
 	}
-	client, err := a.metadataClient()
+	client, err := a.Components().MetadataClient()
 	if err == nil {
 		var value model.Metadata
 		var raw map[string]any
@@ -2102,7 +2156,7 @@ func (a *App) getThemoviedbGroup(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "tmdb is null")
 		return
 	}
-	client, err := a.metadataClient()
+	client, err := a.Components().MetadataClient()
 	if err == nil {
 		var groups []map[string]any
 		groups, err = client.Groups(r.Context(), id)
@@ -2134,7 +2188,7 @@ func (a *App) playList(w http.ResponseWriter, r *http.Request) {
 	}
 	path, err := a.subscriptions.DownloadPath(selected)
 	if err == nil {
-		service, serviceErr := a.mediaService()
+		service, serviceErr := a.Components().MediaService()
 		if serviceErr != nil {
 			err = serviceErr
 		} else {

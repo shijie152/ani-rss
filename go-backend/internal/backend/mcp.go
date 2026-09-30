@@ -54,21 +54,21 @@ func (a *App) mcpTools() []mcp.Tool {
 			if input.Season == nil {
 				input.Season = map[string]any{}
 			}
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
 			return client.Mikan(input.Text, input.Season)
 		}},
 		{Name: "search_anibt", Description: "搜索 AniBT 番剧", InputSchema: mcp.ObjectSchema(nil), Call: func(_ context.Context, _ json.RawMessage) (any, error) {
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
 			return client.AniBT(map[string]any{})
 		}},
 		{Name: "search_anime_garden", Description: "搜索 AnimeGarden 番剧列表", InputSchema: mcp.ObjectSchema(nil), Call: func(_ context.Context, _ json.RawMessage) (any, error) {
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
@@ -81,7 +81,7 @@ func (a *App) mcpTools() []mcp.Tool {
 			if err != nil {
 				return nil, err
 			}
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
@@ -94,7 +94,7 @@ func (a *App) mcpTools() []mcp.Tool {
 			if err != nil {
 				return nil, err
 			}
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
@@ -107,7 +107,7 @@ func (a *App) mcpTools() []mcp.Tool {
 			if err != nil {
 				return nil, err
 			}
-			client, err := a.sourceClient()
+			client, err := a.Components().CatalogueDiscovery(context.Background())
 			if err != nil {
 				return nil, err
 			}
@@ -124,7 +124,7 @@ func (a *App) mcpTools() []mcp.Tool {
 			if err != nil {
 				return nil, fmt.Errorf("RSS解析失败: %w", err)
 			}
-			coordinator, err := a.newCoordinator()
+			coordinator, err := a.Components().Coordinator()
 			if err != nil {
 				return nil, err
 			}
@@ -165,7 +165,7 @@ func (a *App) mcpSubscription(arguments json.RawMessage) (model.Ani, error) {
 	if id == "" {
 		id = source.SubjectID(input.URL)
 	}
-	client, err := a.sourceClient()
+	client, err := a.Components().BangumiMetadata(context.Background())
 	if err != nil {
 		return model.Ani{}, err
 	}
