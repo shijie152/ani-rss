@@ -52,3 +52,19 @@ test('UI source does not hand-build authenticated query strings', async () => {
 
   assert.deepEqual(findings, [])
 })
+
+// 第三方图片（头像、封面）必须经 proxyImage 出去，用户配的代理才对它生效。
+// 直接把远程地址绑到 :src 上，取图由浏览器完成，Go 的出口被整个绕过。
+test('third-party images are requested through the proxy entry', async () => {
+  const files = await sourceFiles(fileURLToPath(new URL('./', import.meta.url)))
+  const hits = (await Promise.all(files.map(async file => {
+    const source = await readFile(file, 'utf8')
+    return [...source.matchAll(/\s:src="([^"]+)"/g)].map(match => ({file, expression: match[1]}))
+  }))).flat()
+  const findings = hits
+      .filter(({expression}) => /avatar|images\[|https?:\/\/|bgm\.tv|tmdb/.test(expression))
+      .filter(({expression}) => !/proxyImage\(/.test(expression))
+      .map(({file, expression}) => `${file}: ${expression}`)
+
+  assert.deepEqual(findings, [])
+})

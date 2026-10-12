@@ -10,7 +10,7 @@
         <div v-if="me">
           <el-descriptions direction="vertical" border>
             <el-descriptions-item :rowspan="2" :width="140" label="头像" align="center">
-              <el-avatar :src="me?.avatar?.large"/>
+              <el-avatar :src="proxyImage(me?.avatar?.large)"/>
             </el-descriptions-item>
             <el-descriptions-item label="用户名">
               <el-text v-if="me.username">
@@ -68,7 +68,7 @@
 
 <script setup>
 import {onMounted, ref} from 'vue'
-import {init} from "@/js/global.js";
+import {init, proxyImage} from "@/js/global.js";
 import api from "@/js/api.js";
 import * as http from "@/js/http.js";
 import {withQuery} from "@/js/requestUtils.js";

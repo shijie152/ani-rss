@@ -136,6 +136,10 @@ const getBaseUrl = () => {
 }
 
 const proxyImage = imgUrl => {
+    if (!imgUrl) return ''
+    // 代理入口需要会话鉴权。OAuth 回调页可能在未登录的窗口里打开，那时退回
+    // 直连——否则头像会换成一张 401，比代理不生效更糟。
+    if (!authorization.value) return imgUrl
     return sessionUrl(endpointPath('proxyImage'), {
         imgUrl: base64Encode(imgUrl),
     }, {base: getBaseUrl(), token: authorization.value})

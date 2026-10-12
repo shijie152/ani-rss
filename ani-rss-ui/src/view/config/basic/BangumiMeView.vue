@@ -13,7 +13,7 @@
               label="头像"
               align="center"
           >
-            <el-avatar :src="me['avatar']['large']" size="large"/>
+            <el-avatar :src="proxyImage(me['avatar']['large'])" size="large"/>
           </el-descriptions-item>
           <el-descriptions-item label="用户名">
             <el-text v-if="me['username']">
@@ -66,6 +66,7 @@
 
 import {ref} from "vue";
 import * as http from "@/js/http.js";
+import {proxyImage} from "@/js/global.js";
 
 let me = ref({
   "avatar": {
