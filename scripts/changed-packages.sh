@@ -8,6 +8,7 @@
 # 基线优先级：$CORE_TEST_BASE → origin/main → HEAD~1
 # 强制全量：CORE_TEST_ALL=1
 # 直接给出改动文件（跳过 git 比对，供测试与排查用）：CORE_TEST_FILES
+# 输出 JSON 数组（供 CI 矩阵使用）：CORE_TEST_FORMAT=json
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,9 +21,18 @@ fi
 
 all() { printf '%s\n' "${packages[*]}"; }
 
+# JSON 输出给 CI 矩阵用，其余情况输出空格分隔的一行。
+emit() {
+	if [ "${CORE_TEST_FORMAT:-}" = "json" ]; then
+		printf '[%s]\n' "$(printf '"%s",' $@ | sed 's/,$//')"
+	else
+		printf '%s\n' "$*"
+	fi
+}
+
 if [ "${CORE_TEST_ALL:-0}" != "0" ]; then
 	echo "CORE_TEST_ALL 已设置，跑全部包" >&2
-	all
+	emit "${packages[@]}"
 	exit 0
 fi
 
@@ -38,7 +48,7 @@ fi
 
 if [ -z "$base" ]; then
 	echo "找不到可比对的基线，跑全部包" >&2
-	all
+	emit "${packages[@]}"
 	exit 0
 fi
 
@@ -47,13 +57,14 @@ if [ -n "${CORE_TEST_FILES:-}" ]; then
 else
 	if ! changed="$(git -C "$repo_root" diff --name-only "${base}...HEAD" 2>/dev/null)"; then
 		echo "与基线 ${base} 无法比对，跑全部包" >&2
-		all
+		emit "${packages[@]}"
 		exit 0
 	fi
 fi
 
 if [ -z "$changed" ]; then
 	echo "相对 ${base} 无改动，跳过" >&2
+	[ "${CORE_TEST_FORMAT:-}" = "json" ] && printf '[]\n'
 	exit 0
 fi
 
@@ -89,14 +100,15 @@ done <<<"$changed"
 
 if [ -n "$shared" ]; then
 	echo "改动涉及共享代码（${shared}），跑全部包" >&2
-	all
+	emit "${packages[@]}"
 	exit 0
 fi
 
 if [ "${#selected[@]}" -eq 0 ]; then
 	echo "改动不涉及核心包，跳过" >&2
+	[ "${CORE_TEST_FORMAT:-}" = "json" ] && printf '[]\n'
 	exit 0
 fi
 
 echo "按改动选中：${selected[*]}" >&2
-printf '%s\n' "${selected[*]}"
+emit "${selected[@]}"

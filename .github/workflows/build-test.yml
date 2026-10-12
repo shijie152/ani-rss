@@ -5,8 +5,47 @@ on:
   pull_request:
   workflow_dispatch:
 jobs:
+  # 先算出「这次改动碰到了哪些核心包」，让变异测试按包分片、并且没改就整体跳过。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Detect changed core packages
+        id: detect
+        env:
+          CORE_TEST_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CORE_TEST_FORMAT: json
+        run: echo "packages=$(bash scripts/changed-packages.sh rss torrent source metadata subscription outbound)" >> "$GITHUB_OUTPUT"
+
+  # 六个包各自一个 runner：单机并行没有收益（变异体逐个编译，被构建缓存锁串行化），
+  # 分片才能把墙钟从「求和」压到「最慢的那个包」。
+  mutation:
+    needs: changes
+    if: needs.changes.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.changes.outputs.packages) }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-backend/go.mod
+          cache-dependency-path: go-backend/go.sum
+      - name: Mutation test ${{ matrix.package }}
+        run: bash scripts/test-core-mutations.sh ${{ matrix.package }}
+
   build:
     runs-on: ubuntu-latest
+    needs: changes
     steps:
       - name: Check out
         uses: actions/checkout@v6
@@ -24,10 +63,6 @@ jobs:
         env:
           CORE_TEST_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: FUZZ_TIME=5s bash scripts/test-core-fuzz.sh
-      - name: Mutation test core business packages
-        env:
-          CORE_TEST_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/test-core-mutations.sh
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
