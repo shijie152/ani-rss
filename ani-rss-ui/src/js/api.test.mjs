@@ -67,3 +67,88 @@ test('timeout zero disables the request timeout', async () => {
   assert.equal(aborted, false, 'timeout: 0 must not schedule an abort')
   void pending
 })
+
+test('read requests share one transport while each caller can cancel independently', async () => {
+  const requests = []
+  globalThis.fetch = (_url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(init.signal.reason))
+    requests.push({signal: init.signal, resolve})
+  })
+  const firstController = new AbortController()
+  const secondController = new AbortController()
+  const response = {ok: true, status: 200, text: async () => JSON.stringify({code: 200, data: {}})}
+
+  const first = api.post('api/config', undefined, {signal: firstController.signal, silent: true})
+  const second = api.post('api/config', undefined, {signal: secondController.signal, silent: true})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.length, 1, 'duplicate read requests must share the underlying transport')
+
+  secondController.abort()
+  await assert.rejects(second, error => error.message === '请求已取消')
+  assert.equal(requests[0].signal.aborted, false, 'one caller cancelling must not abort other consumers')
+  requests[0].resolve(response)
+  assert.equal((await first).code, 200, 'cancelling one caller must leave the other request alive')
+})
+
+test('shared read request aborts transport after every caller cancels', async () => {
+  const requests = []
+  globalThis.fetch = (_url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(init.signal.reason))
+    requests.push({signal: init.signal, resolve})
+  })
+  const firstController = new AbortController()
+  const secondController = new AbortController()
+  const first = api.post('api/config', undefined, {signal: firstController.signal, silent: true})
+  const second = api.post('api/config', undefined, {signal: secondController.signal, silent: true})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.length, 1)
+
+  firstController.abort()
+  secondController.abort()
+  await Promise.all([
+    assert.rejects(first, error => error.message === '请求已取消'),
+    assert.rejects(second, error => error.message === '请求已取消')
+  ])
+  assert.equal(requests[0].signal.aborted, true, 'the transport should stop once no callers remain')
+})
+
+test('a retry after every shared caller cancels starts a fresh transport', async () => {
+  const requests = []
+  globalThis.fetch = (_url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(init.signal.reason))
+    requests.push({signal: init.signal, resolve})
+  })
+  const controller = new AbortController()
+  const cancelled = api.post('api/config', undefined, {signal: controller.signal, silent: true})
+  await new Promise(resolve => setImmediate(resolve))
+  controller.abort()
+  await assert.rejects(cancelled, error => error.message === '请求已取消')
+
+  const retry = api.post('api/config', undefined, {silent: true})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.length, 2, 'retry must not join the transport that was just aborted')
+  requests[1].resolve({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({code: 200, data: {}})
+  })
+  assert.equal((await retry).code, 200)
+})
+
+test('a caller timeout does not cancel another consumer of a shared read', async () => {
+  const requests = []
+  globalThis.fetch = (_url, init) => new Promise(resolve => {
+    requests.push({signal: init.signal, resolve})
+  })
+  const shortTimeout = api.post('api/config', undefined, {timeout: 5, silent: true})
+  const noTimeout = api.post('api/config', undefined, {timeout: 0, silent: true})
+  await assert.rejects(shortTimeout, error => error.message === '请求超时，请稍后重试')
+  assert.equal(requests.length, 1, 'callers with different timeouts still share one transport')
+  assert.equal(requests[0].signal.aborted, false, 'one caller timing out must not cancel the other')
+  requests[0].resolve({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({code: 200, data: {}})
+  })
+  assert.equal((await noTimeout).code, 200)
+})

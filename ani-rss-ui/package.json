@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "node --test src/*.test.mjs src/js/*.test.mjs src/view/home/*.test.mjs",
     "test:mutation": "node ../scripts/test-ui-mutations.mjs",
-    "test:browser": "playwright test"
+    "test:visual": "playwright test tests/browser/visual-regression.spec.mjs",
+    "test:browser": "playwright test tests/browser/season-page.spec.mjs tests/browser/source-browsing.spec.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

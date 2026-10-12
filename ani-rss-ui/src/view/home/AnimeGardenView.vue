@@ -293,8 +293,9 @@ let batchAddition = async () => {
 }
 
 let copy = async (v) => {
-  await copyText(v)
-  ElMessage.success('已复制')
+  const copied = await copyText(v)
+  if (copied) ElMessage.success('已复制')
+  else ElMessage.error('复制失败，请手动复制')
 }
 
 </script>

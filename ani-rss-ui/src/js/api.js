@@ -44,15 +44,69 @@ let put = (url, body, options = {}) => fetch_(url, 'PUT', body, options)
 const fetch_ = (url, method, body, options = {}) => {
     const dedupe = shouldDedupe(url, method, options)
     const key = requestKey(url, method, body)
-    if (dedupe && inflight.has(key)) return inflight.get(key)
+    if (dedupe) {
+        let shared = inflight.get(key)
+        if (!shared) {
+            const controller = new AbortController()
+            shared = {controller, consumers: 0, key}
+            shared.promise = requestImpl(url, method, body, {
+                ...options,
+                signal: controller.signal,
+                timeout: 0
+            })
+            inflight.set(key, shared)
+            shared.promise.finally(() => {
+                if (inflight.get(key) === shared) inflight.delete(key)
+            }).catch(() => {})
+        }
+        return consumeSharedRequest(shared, options)
+    }
 
-    const request = requestImpl(url, method, body, options)
-    if (!dedupe) return request
-    inflight.set(key, request)
-    request.finally(() => {
-        if (inflight.get(key) === request) inflight.delete(key)
-    }).catch(() => {})
-    return request
+    return requestImpl(url, method, body, options)
+}
+
+const consumeSharedRequest = (shared, options) => {
+    const {signal, cleanup} = makeSignal(options.signal, options.timeout ?? REQUEST_TIMEOUT)
+    shared.consumers++
+
+    return new Promise((resolve, reject) => {
+        let settled = false
+        const release = () => {
+            if (settled) return
+            settled = true
+            signal.removeEventListener('abort', onAbort)
+            cleanup()
+            shared.consumers--
+            if (shared.consumers === 0 && !shared.controller.signal.aborted) {
+                if (inflight.get(shared.key) === shared) inflight.delete(shared.key)
+                shared.controller.abort(new DOMException('所有请求调用方均已取消', 'AbortError'))
+            }
+        }
+        const onAbort = () => {
+            const reason = signal.reason
+            release()
+            if (reason?.name === 'TimeoutError' || (reason?.name === 'AbortError' && reason.cause?.name === 'TimeoutError')) {
+                reject(new ApiError('请求超时，请稍后重试', {cause: reason}))
+            } else {
+                reject(new ApiError('请求已取消', {cause: reason}))
+            }
+        }
+
+        if (signal.aborted) {
+            onAbort()
+            return
+        }
+        signal.addEventListener('abort', onAbort, {once: true})
+        shared.promise.then(value => {
+            if (settled) return
+            release()
+            resolve(value)
+        }, error => {
+            if (settled) return
+            release()
+            reject(error)
+        })
+    })
 }
 
 const requestImpl = async (url, method, body, options) => {

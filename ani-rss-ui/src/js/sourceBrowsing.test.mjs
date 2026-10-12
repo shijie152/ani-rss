@@ -83,6 +83,16 @@ test('copyText falls back to a hidden input when the clipboard is unavailable', 
   assert.equal(document.execCommand('copy'), true)
 })
 
+test('source views only report copy success when the copy port succeeds', async () => {
+  const root = fileURLToPath(new URL('../view/home/', import.meta.url))
+  for (const name of ['MikanView.vue', 'AniBTView.vue', 'AnimeGardenView.vue']) {
+    const source = await readFile(join(root, name), 'utf8')
+    assert.match(source, /const copied = await copyText\(v\)/, `${name} must inspect copyText result`)
+    assert.match(source, /if \(copied\).*ElMessage\.success\('已复制'\)/s, `${name} must only report success after copying`)
+    assert.match(source, /ElMessage\.error\('复制失败，请手动复制'\)/, `${name} must report copy failure`)
+  }
+})
+
 // 三个源站都必须有 adapter，且视图不得自己再定义一份（那会与这份漂移）。
 // 视图必须引用 module 里的 adapter：自己再写一份 definition 会与这份漂移，
 // 而视图文件在 Node 里加载不了，测试只能测到 module 这一份。
