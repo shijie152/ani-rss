@@ -1,12 +1,10 @@
 package backend
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,17 +12,17 @@ import (
 	"time"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
-	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
 )
 
 const defaultBGMTokenStatusURL = "https://bgm.tv/oauth/token_status"
 const defaultBGMOAuthURL = "https://bgm.tv/oauth/access_token"
 
-func (a *App) bgmClient() (*http.Client, model.Config, error) {
+func (a *App) bgmClient() (*outbound.Client, model.Config, error) {
 	cfg := a.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	client, err := outbound.FromConfig(cfg, a.logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -47,32 +45,32 @@ func bgmToken(cfg model.Config) (string, error) {
 	return token, nil
 }
 
-func bgmRequest(ctx context.Context, client *http.Client, method, target, token string, body []byte, contentType string) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
+func bgmRequest(ctx context.Context, client *outbound.Client, method, target, token string, body []byte, contentType string) (*outbound.Response, error) {
+	header := http.Header{}
 	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+		header.Set("Authorization", "Bearer "+token)
 	}
 	if contentType != "" {
-		request.Header.Set("Content-Type", contentType)
+		header.Set("Content-Type", contentType)
 	}
-	return client.Do(request)
+	return client.Do(ctx, outbound.Call{
+		Service:  "bangumi",
+		Method:   method,
+		URL:      target,
+		Header:   header,
+		Body:     body,
+		MaxBytes: 16 << 20,
+	})
 }
 
-func bgmJSONResponse(response *http.Response, target any) error {
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Bangumi HTTP %d", response.StatusCode)
+func bgmJSONResponse(response *outbound.Response, target any) error {
+	if !response.OK() {
+		return fmt.Errorf("Bangumi HTTP %d", response.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(target); err != nil {
-		return err
-	}
-	return nil
+	return response.JSON(target)
 }
 
-func (a *App) bgmMeRaw(ctx context.Context, client *http.Client, cfg model.Config, token string) (map[string]any, error) {
+func (a *App) bgmMeRaw(ctx context.Context, client *outbound.Client, cfg model.Config, token string) (map[string]any, error) {
 	response, err := bgmRequest(ctx, client, http.MethodGet, bgmAPIBase(cfg)+"/v0/me", token, nil, "")
 	if err != nil {
 		return nil, err
@@ -117,10 +115,9 @@ func (a *App) rate(w http.ResponseWriter, r *http.Request) {
 				if username == "" {
 					err = errors.New("BGM 用户信息缺少 username/id")
 				} else {
-					var response *http.Response
+					var response *outbound.Response
 					response, err = bgmRequest(r.Context(), client, http.MethodGet, bgmAPIBase(cfg)+"/v0/users/"+url.PathEscape(username)+"/collections/"+url.PathEscape(subjectID), token, nil, "")
-					if err == nil && response.StatusCode == http.StatusNotFound {
-						response.Body.Close()
+					if err == nil && response.Status == http.StatusNotFound {
 						writeResult(w, http.StatusOK, 0, "success")
 						return
 					}
@@ -170,16 +167,14 @@ func (a *App) setRate(w http.ResponseWriter, r *http.Request) {
 			if marshalErr != nil {
 				err = marshalErr
 			} else {
-				var response *http.Response
+				var response *outbound.Response
 				response, err = bgmRequest(r.Context(), client, http.MethodPost, bgmAPIBase(cfg)+"/v0/users/-/collections/"+url.PathEscape(subjectID), token, body, "application/json")
 				if err == nil {
-					if response.StatusCode >= 200 && response.StatusCode < 300 {
-						response.Body.Close()
+					if response.OK() {
 						writeResult(w, http.StatusOK, score, "保存评分成功")
 						return
 					}
-					err = fmt.Errorf("Bangumi HTTP %d", response.StatusCode)
-					response.Body.Close()
+					err = fmt.Errorf("Bangumi HTTP %d", response.Status)
 				}
 			}
 		}
@@ -202,10 +197,9 @@ func (a *App) rateWithMessage(w http.ResponseWriter, r *http.Request, subjectID,
 				if username == "" {
 					err = errors.New("BGM 用户信息缺少 username/id")
 				} else {
-					var response *http.Response
+					var response *outbound.Response
 					response, err = bgmRequest(r.Context(), client, http.MethodGet, bgmAPIBase(cfg)+"/v0/users/"+url.PathEscape(username)+"/collections/"+url.PathEscape(subjectID), token, nil, "")
-					if err == nil && response.StatusCode == http.StatusNotFound {
-						response.Body.Close()
+					if err == nil && response.Status == http.StatusNotFound {
 						writeResult(w, http.StatusOK, 0, message)
 						return
 					}
@@ -246,7 +240,7 @@ func (a *App) meBGM(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusInternalServerError, nil, sourceError(err))
 }
 
-func (a *App) bgmExpiresDays(ctx context.Context, client *http.Client, cfg model.Config, token string) (int, error) {
+func (a *App) bgmExpiresDays(ctx context.Context, client *outbound.Client, cfg model.Config, token string) (int, error) {
 	target := defaultBGMTokenStatusURL
 	if configured := appconfig.String(cfg, "bgmTokenStatusApi"); configured != "" {
 		target = strings.TrimRight(configured, "/")
@@ -362,7 +356,7 @@ func (a *App) bgmOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			if configured := appconfig.String(cfg, "bgmOAuthApi"); configured != "" {
 				target = strings.TrimRight(configured, "/")
 			}
-			var response *http.Response
+			var response *outbound.Response
 			response, err = bgmRequest(r.Context(), client, http.MethodPost, target, "", []byte(form.Encode()), "application/x-www-form-urlencoded")
 			if err == nil {
 				var value struct {

@@ -17,6 +17,7 @@ import (
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/notification"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 )
 
@@ -55,7 +56,7 @@ func TestDispatcherFiltersRendersRetriesAndDeduplicatesWebhook(t *testing.T) {
 		"enable": true, "retry": 2, "sort": 1, "notificationType": "WEB_HOOK", "statusList": []any{"DOWNLOAD_END"},
 		"notificationTemplate": "${emoji}${title} ${episodeFormat} ${action} ${comment}", "comment": "hello", "webHookMethod": "POST", "webHookUrl": server.URL, "webHookHeader": "X-Test: yes", "webHookBody": "${notification}",
 	}})
-	d := notification.New(m, t.TempDir(), nil, nil)
+	d := notification.New(m, t.TempDir(), outbound.New(outbound.Options{}), nil)
 	event := notification.Event{Ani: model.Ani{ID: "ani-1", Title: "Demo", Season: 2, Message: true}, Resource: &model.Resource{InfoHash: "hash", Episode: 3}, Status: notification.DownloadEnd, Text: "完成"}
 	if err := d.Dispatch(context.Background(), event); err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestDispatcherHTTPNotificationsAndEmbyRefresh(t *testing.T) {
 	}))
 	defer server.Close()
 	reader := configReader(t, nil)
-	d := notification.New(reader, t.TempDir(), nil, nil)
+	d := notification.New(reader, t.TempDir(), outbound.New(outbound.Options{}), nil)
 	ani := model.Ani{ID: "http", Title: "Demo", Season: 1, Message: true}
 	for _, cfg := range []map[string]any{
 		{"notificationType": "BARK", "barkServerUrl": server.URL, "barkDeviceKeys": []any{"device"}, "barkUseMarkdown": true},
@@ -131,7 +132,7 @@ func TestTelegramUpdatesFillsMissingUsernameFromFirstAndLastName(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := notification.New(configReader(t, nil), t.TempDir(), nil, nil)
+	d := notification.New(configReader(t, nil), t.TempDir(), outbound.New(outbound.Options{}), nil)
 	updates, err := d.TelegramUpdates(context.Background(), map[string]any{"telegramApiHost": server.URL, "telegramBotToken": "token"})
 	if err != nil || len(updates) != 1 || updates[0]["username"] != "Ada Lovelace" || updates[0]["firstName"] != "Ada" || updates[0]["lastName"] != "Lovelace" {
 		t.Fatalf("Telegram updates = %#v, err=%v", updates, err)
@@ -150,7 +151,7 @@ func TestDispatcherSMTPAndShellBoundaries(t *testing.T) {
 	mailReceived := make(chan struct{}, 1)
 	go fakeSMTP(listener, mailReceived)
 	m := configReader(t, nil)
-	d := notification.New(m, t.TempDir(), nil, nil)
+	d := notification.New(m, t.TempDir(), outbound.New(outbound.Options{}), nil)
 	mailHost, mailPort, _ := net.SplitHostPort(listener.Addr().String())
 	var port int
 	_, _ = fmt.Sscanf(mailPort, "%d", &port)
@@ -225,7 +226,7 @@ func TestDispatcherFileMoveAndOpenListUploadRespectDeleteFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := configReader(t, nil)
-	d := notification.New(m, root, nil, nil)
+	d := notification.New(m, root, outbound.New(outbound.Options{}), nil)
 	ani := model.Ani{ID: "file", Title: "Demo", Season: 1, Message: true}
 	target := filepath.Join(root, "target")
 	if err := d.Test(context.Background(), map[string]any{"notificationType": "FILE_MOVE", "fileMoveTarget": target}, notification.Event{Ani: ani, Status: notification.DownloadEnd, Path: source, Text: "done"}); err != nil {

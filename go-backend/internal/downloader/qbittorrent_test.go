@@ -11,6 +11,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestQBittorrentAdapterUsesAuthAndMapsStatuses(t *testing.T) {
@@ -35,7 +36,7 @@ func TestQBittorrentAdapterUsesAuthAndMapsStatuses(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, APIKey: "qbt_test"}
 	if err := adapter.Login(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestQBittorrentUsernamePasswordLoginAndFiltersForeignTasks(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, Username: "user", Password: "pass"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, Username: "user", Password: "pass"}
 	if err := adapter.Login(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestQBittorrentAddCarriesJavaDownloadParameters(t *testing.T) {
 		_, _ = w.Write([]byte("Ok"))
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test", ContentLayout: "Subfolder", UseDownloadPath: true, UpLimit: 1024, DlLimit: 2048, RatioLimit: 1, SeedingTimeLimit: 3600, InactiveSeedingTimeLimit: 7200, Rename: "Demo S01E01"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, APIKey: "qbt_test", ContentLayout: "Subfolder", UseDownloadPath: true, UpLimit: 1024, DlLimit: 2048, RatioLimit: 1, SeedingTimeLimit: 3600, InactiveSeedingTimeLimit: 7200, Rename: "Demo S01E01"}
 	if err := adapter.Add(context.Background(), model.Resource{Title: "Demo", Magnet: "magnet:?xt=urn:btih:abc"}, "/media", []string{"ani-rss", "Group"}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestQBittorrentSetSavePathDisablesAutomaticManagementFirst(t *testing.T) {
 		_, _ = w.Write([]byte("Ok"))
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, APIKey: "qbt_test"}
 	if err := adapter.SetSavePath(context.Background(), "ABC", "/new"); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +164,7 @@ func TestQBittorrentWaitsForCompletionAndReportsFailure(t *testing.T) {
 		}]`))
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, APIKey: "qbt_test"}
 	task, err := adapter.WaitForCompletion(context.Background(), "done", time.Millisecond)
 	if err != nil || task.State != "stoppedUP" || polls.Load() < 2 {
 		t.Fatalf("task=%#v err=%v polls=%d", task, err, polls.Load())
@@ -176,7 +177,7 @@ func TestQBittorrentWaitsForCompletionAndReportsFailure(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"hash":"bad","name":"Demo","state":"error","progress":0,"size":100,"amount_left":100,"category":"ani-rss","tags":"ani-rss"}]`))
 	}))
 	defer failure.Close()
-	failedTask, err := (&downloader.QBittorrent{Host: failure.URL, APIKey: "qbt_test"}).WaitForCompletion(context.Background(), "bad", time.Millisecond)
+	failedTask, err := (&downloader.QBittorrent{Outbound: testutil.OutboundClient(failure.Client()), Host: failure.URL, APIKey: "qbt_test"}).WaitForCompletion(context.Background(), "bad", time.Millisecond)
 	if err == nil || failedTask.State != "error" {
 		t.Fatalf("failed task=%#v err=%v", failedTask, err)
 	}
@@ -197,7 +198,7 @@ func TestQBittorrentAddAcceptsAcceptedMagnetResponse(t *testing.T) {
 		_, _ = w.Write([]byte(`{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}`))
 	}))
 	defer server.Close()
-	adapter := &downloader.QBittorrent{Host: server.URL, APIKey: "qbt_test"}
+	adapter := &downloader.QBittorrent{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, APIKey: "qbt_test"}
 	if err := adapter.Add(context.Background(), model.Resource{Title: "Demo", Magnet: "magnet:?xt=urn:btih:abc"}, "/media", []string{"ani-rss"}, false); err != nil {
 		t.Fatalf("Add() on 202 pending = %v, want nil", err)
 	}

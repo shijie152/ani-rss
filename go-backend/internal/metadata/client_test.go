@@ -10,6 +10,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestClientLooksUpTMDBSeasonAndBangumiFallback(t *testing.T) {
@@ -28,7 +29,7 @@ func TestClientLooksUpTMDBSeasonAndBangumiFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := metadata.New(model.Config{"tmdbApi": server.URL, "tmdbApiKey": "test", "bgmApi": server.URL}, server.Client())
+	client := metadata.New(model.Config{"tmdbApi": server.URL, "tmdbApiKey": "test", "bgmApi": server.URL}, testutil.OutboundClient(server.Client()))
 	value, raw, err := client.Lookup(context.Background(), model.Ani{TMDB: map[string]any{"id": "42"}, Season: 1})
 	if err != nil || raw["id"] == nil || value.Title != "Demo" || len(value.EpisodeInfo) != 1 || value.EpisodeInfo[0].Still != "/still.jpg" {
 		t.Fatalf("tmdb value=%#v raw=%#v err=%v", value, raw, err)
@@ -48,7 +49,7 @@ func TestClientUsesBangumiWhenTMDBIsDisabled(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":42,"name":"Demo JP","name_cn":"Demo CN","eps":12,"date":"2024-01-01","images":{"large":"https://img.test/poster.jpg"}}`)
 	}))
 	defer server.Close()
-	client := metadata.New(model.Config{"tmdb": false, "bgmApi": server.URL}, server.Client())
+	client := metadata.New(model.Config{"tmdb": false, "bgmApi": server.URL}, testutil.OutboundClient(server.Client()))
 	value, _, err := client.Lookup(context.Background(), model.Ani{Title: "Demo", BGMURL: "https://bgm.tv/subject/42"})
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,6 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
@@ -30,6 +28,7 @@ import (
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 )
 
@@ -39,7 +38,7 @@ type Service struct {
 	Config       appconfig.Reader
 	ConfigDir    string
 	Metadata     *metadata.Client
-	HTTPClient   *http.Client
+	Outbound     *outbound.Client
 	ResolvePath  PathResolver
 	ResolveOther func(model.Ani, string) (string, error)
 	Logger       *slog.Logger
@@ -75,12 +74,14 @@ var (
 	bracketEpisode       = regexp.MustCompile(`(?:\[|\s|-)(\d+(?:\.5)?)(?:\]|\s|\.|$)`)
 )
 
-func New(config appconfig.Reader, metadataClient *metadata.Client, client *http.Client, resolver PathResolver) *Service {
+func New(config appconfig.Reader, metadataClient *metadata.Client, client *outbound.Client, resolver PathResolver) *Service {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		// This constructor cannot report a failure, so a nil client selects the
+		// shared default policy; the application always passes the configured one.
+		client = outbound.New(outbound.Options{})
 	}
 	logger := slog.Default()
-	return &Service{Config: config, Metadata: metadataClient, HTTPClient: client, ResolvePath: resolver, Logger: logger}
+	return &Service{Config: config, Metadata: metadataClient, Outbound: client, ResolvePath: resolver, Logger: logger}
 }
 
 func (s *Service) Scrape(ctx context.Context, ani *model.Ani, force bool) (Result, error) {
@@ -398,7 +399,7 @@ func (s *Service) RefreshCover(ctx context.Context, imageURL string, override bo
 			return relative, nil
 		}
 	}
-	response, err := s.HTTPClient.Get(imageURL)
+	response, err := s.Outbound.Stream(context.Background(), outbound.Call{Service: "cover", URL: imageURL})
 	if err != nil {
 		return defaultPath, defaultErr
 	}
@@ -677,7 +678,7 @@ func (s *Service) saveImage(imagePath, target string, force bool) error {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return errors.New("图片地址格式异常")
 	}
-	response, err := s.HTTPClient.Get(imageURL)
+	response, err := s.Outbound.Stream(context.Background(), outbound.Call{Service: "thumb", URL: imageURL})
 	if err != nil {
 		return err
 	}

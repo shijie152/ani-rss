@@ -3,12 +3,11 @@ package rss
 import (
 	"context"
 	"errors"
-	"net/http"
 	"strings"
-	"time"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // Feed describes one primary or standby RSS input. It is deliberately small
@@ -24,9 +23,9 @@ type Feed struct {
 // intentionally outside this type, so preview and conversion cannot mutate
 // downloader or history state by accident.
 type Intake struct {
-	Config     appconfig.Reader
-	HTTPClient *http.Client
-	Retry      int
+	Config   appconfig.Reader
+	Outbound *outbound.Client
+	Retry    int
 }
 
 func (i *Intake) Feeds(item model.Ani) []Feed {
@@ -67,14 +66,6 @@ func (i *Intake) Collect(ctx context.Context, item model.Ani) ([]model.Resource,
 }
 
 func (i *Intake) CollectFeed(ctx context.Context, item model.Ani, feed Feed) ([]model.Resource, error) {
-	client := i.HTTPClient
-	if client == nil {
-		timeout := 20 * time.Second
-		if i.Config != nil && appconfig.Int(i.Config.Snapshot(), "rssTimeout") > 0 {
-			timeout = time.Duration(appconfig.Int(i.Config.Snapshot(), "rssTimeout")) * time.Second
-		}
-		client = &http.Client{Timeout: timeout}
-	}
 	retries := i.Retry
 	if retries < 1 && i.Config != nil {
 		retries = appconfig.Int(i.Config.Snapshot(), "downloadRetry")
@@ -82,7 +73,7 @@ func (i *Intake) CollectFeed(ctx context.Context, item model.Ani, feed Feed) ([]
 	if retries < 1 {
 		retries = 1
 	}
-	body, err := Fetch(ctx, client, feed.URL, retries)
+	body, err := Fetch(ctx, i.Outbound, feed.URL, retries)
 	if err != nil {
 		return nil, err
 	}

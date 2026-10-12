@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -18,6 +17,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/cache"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/regexutil"
 )
 
@@ -37,9 +37,12 @@ type Options struct {
 	Background func(func())
 	// BGMCoverURL is the optional cache endpoint used by the legacy
 	// AnimeGarden page to fill Bangumi covers.
-	BGMCoverURL   string
-	Config        model.Config
-	HTTPClient    *http.Client
+	BGMCoverURL string
+	Config      model.Config
+	// Outbound is the shared third-party entry point. The runtime owns retry,
+	// cache and request lifecycle concerns on top of it, so adapters cannot
+	// diverge on transport policy.
+	Outbound      *outbound.Client
 	Subscriptions func() []model.Ani
 	// Metadata is the shared metadata authority used by the application.
 	Metadata *metadata.Client
@@ -52,7 +55,7 @@ type Options struct {
 type runtime struct {
 	mikanHost, aniBTHost, gardenHost, bangumiAPI, bgmCoverURL string
 	config                                                    model.Config
-	httpClient                                                *http.Client
+	outbound                                                  *outbound.Client
 	subscriptions                                             func() []model.Ani
 	retries                                                   int
 	cache                                                     *cache.Cache[[]byte]
@@ -61,9 +64,12 @@ type runtime struct {
 }
 
 func newRuntime(options Options) *runtime {
-	httpClient := options.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 20 * time.Second}
+	requestClient := options.Outbound
+	if requestClient == nil {
+		// A nil client selects the shared default policy. The application always
+		// passes the client built from the current configuration, which is what
+		// makes the configured proxy apply here.
+		requestClient = outbound.New(outbound.Options{})
 	}
 	retries := options.Retries
 	if retries < 1 {
@@ -85,7 +91,7 @@ func newRuntime(options Options) *runtime {
 		bangumiAPI:     strings.TrimRight(options.BangumiAPI, "/"),
 		bgmCoverURL:    strings.TrimRight(options.BGMCoverURL, "/"),
 		config:         options.Config,
-		httpClient:     httpClient,
+		outbound:       requestClient,
 		subscriptions:  options.Subscriptions,
 		retries:        retries,
 		cache:          options.Cache,
@@ -159,40 +165,15 @@ func (c *runtime) get(ctx context.Context, target string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var lastErr error
-	for attempt := 0; attempt < c.retries; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("User-Agent", "ani-rss-go")
-		response, err := c.httpClient.Do(request)
-		if err == nil {
-			body, readErr := readSourceResponse(response)
-			if readErr == nil {
-				return body, nil
-			}
-			lastErr = readErr
-		} else {
-			lastErr = err
-		}
-		if attempt+1 < c.retries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-			}
-		}
-	}
-	return nil, lastErr
-}
-
-func readSourceResponse(response *http.Response) ([]byte, error) {
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("source returned HTTP %d", response.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	return c.outbound.Read(ctx, outbound.Call{
+		Service:      "source",
+		Method:       http.MethodGet,
+		URL:          target,
+		MaxBytes:     16 << 20,
+		Attempts:     c.retries,
+		RetryStatus:  outbound.RetryAnyStatus,
+		StatusPrefix: "source returned ",
+	})
 }
 
 func itemTime(item map[string]any, keys ...string) any {

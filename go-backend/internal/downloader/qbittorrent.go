@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 type QBittorrent struct {
@@ -29,7 +29,7 @@ type QBittorrent struct {
 	InactiveSeedingTimeLimit         int64
 	UpLimit, DlLimit                 int64
 	Rename                           string
-	Client                           *http.Client
+	Outbound                         *outbound.Client
 	mu                               sync.RWMutex
 	sessionCookie                    string
 }
@@ -43,13 +43,38 @@ type TorrentFile struct {
 	Priority int    `json:"priority"`
 }
 
-func (q *QBittorrent) httpClient() *http.Client {
-	if q.Client != nil {
-		return q.Client
-	}
-	return &http.Client{Timeout: 20 * time.Second}
-}
 func (q *QBittorrent) endpoint(path string) string { return strings.TrimRight(q.Host, "/") + path }
+
+// call performs one qBittorrent RPC through the shared third-party entry point,
+// attaching the session cookie or API key the same way for every endpoint.
+func (q *QBittorrent) call(ctx context.Context, method, path string, headers http.Header, body []byte) (*outbound.Response, error) {
+	if q.Outbound == nil {
+		return nil, errors.New("下载器客户端未配置")
+	}
+	header := http.Header{}
+	for key, values := range headers {
+		for _, value := range values {
+			header.Add(key, value)
+		}
+	}
+	if q.APIKey != "" {
+		header.Set("Authorization", "Bearer "+q.APIKey)
+	}
+	q.mu.RLock()
+	cookie := q.sessionCookie
+	q.mu.RUnlock()
+	if cookie != "" {
+		header.Set("Cookie", cookie)
+	}
+	return q.Outbound.Do(ctx, outbound.Call{
+		Service:  "qbittorrent",
+		Method:   method,
+		URL:      q.endpoint(path),
+		Header:   header,
+		Body:     body,
+		MaxBytes: 8 << 20,
+	})
+}
 
 func (q *QBittorrent) Login(ctx context.Context) error {
 	if strings.TrimSpace(q.Host) == "" {
@@ -60,19 +85,14 @@ func (q *QBittorrent) Login(ctx context.Context) error {
 			return errors.New("qBittorrent 未配置完成")
 		}
 		form := url.Values{"username": []string{q.Username}, "password": []string{q.Password}}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint("/api/v2/auth/login"), strings.NewReader(form.Encode()))
+		response, err := q.call(ctx, http.MethodPost, "/api/v2/auth/login",
+			http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}}, []byte(form.Encode()))
 		if err != nil {
 			return err
 		}
-		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		response, err := q.httpClient().Do(request)
-		if err != nil {
-			return err
-		}
-		defer response.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		if response.StatusCode < 200 || response.StatusCode >= 300 || !strings.HasPrefix(strings.TrimSpace(string(body)), "Ok") {
-			return fmt.Errorf("qBittorrent login returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		body := strings.TrimSpace(string(response.Body))
+		if !response.OK() || !strings.HasPrefix(body, "Ok") {
+			return fmt.Errorf("qBittorrent login returned HTTP %d: %s", response.Status, body)
 		}
 		for _, cookie := range response.Cookies() {
 			if cookie.Name == "SID" {
@@ -86,18 +106,12 @@ func (q *QBittorrent) Login(ctx context.Context) error {
 	if strings.TrimSpace(q.APIKey) == "" {
 		return errors.New("qBittorrent 未配置完成")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/app/version"), nil)
+	response, err := q.call(ctx, http.MethodGet, "/api/v2/app/version", nil, nil)
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent login returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent login returned HTTP %d", response.Status)
 	}
 	return nil
 }
@@ -135,44 +149,31 @@ func (q *QBittorrent) Add(ctx context.Context, resource model.Resource, savePath
 	} else {
 		form.Set("urls", resource.DownloadURL)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint("/api/v2/torrents/add"), strings.NewReader(form.Encode()))
+	response, err := q.call(ctx, http.MethodPost, "/api/v2/torrents/add",
+		http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}}, []byte(form.Encode()))
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
 	// Java's BaseDownload accepts any 2xx from /api/v2/torrents/add. qBittorrent
 	// v5 answers magnet adds asynchronously with HTTP 202 and a JSON body such as
 	// {"pending_count":1}, so the body is informational only; the status decides
 	// success. Treating non-"Ok" bodies as failures drops history/progress.
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		return fmt.Errorf("qBittorrent add returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent add returned HTTP %d: %s", response.Status, strings.TrimSpace(string(response.Body)))
 	}
 	return nil
 }
 
 func (q *QBittorrent) Torrents(ctx context.Context) ([]model.Torrent, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/torrents/info"), nil)
+	response, err := q.call(ctx, http.MethodGet, "/api/v2/torrents/info", nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	q.authorize(request)
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("qBittorrent info returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return nil, fmt.Errorf("qBittorrent info returned HTTP %d", response.Status)
 	}
 	var raw []qbTorrent
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&raw); err != nil {
+	if err := response.JSON(&raw); err != nil {
 		return nil, err
 	}
 	result := make([]model.Torrent, 0, len(raw))
@@ -333,19 +334,13 @@ type qbTorrent struct {
 
 func (q *QBittorrent) Delete(ctx context.Context, hash string, deleteFiles bool) error {
 	form := url.Values{"hashes": []string{hash}, "deleteFiles": []string{strconv.FormatBool(deleteFiles)}}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint("/api/v2/torrents/delete"), strings.NewReader(form.Encode()))
+	response, err := q.call(ctx, http.MethodPost, "/api/v2/torrents/delete",
+		http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}}, []byte(form.Encode()))
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent delete returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent delete returned HTTP %d", response.Status)
 	}
 	return nil
 }
@@ -378,21 +373,15 @@ func (q *QBittorrent) Start(ctx context.Context, hash string) error {
 // qBittorrent capability rather than part of the cross-downloader Adapter:
 // collection renaming depends on qBittorrent's file-priority API.
 func (q *QBittorrent) Files(ctx context.Context, hash string) ([]TorrentFile, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/torrents/files?hash="+url.QueryEscape(hash)), nil)
+	response, err := q.call(ctx, http.MethodGet, "/api/v2/torrents/files?hash="+url.QueryEscape(hash), nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	q.authorize(request)
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("qBittorrent files returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return nil, fmt.Errorf("qBittorrent files returned HTTP %d", response.Status)
 	}
 	var files []TorrentFile
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&files); err != nil {
+	if err := response.JSON(&files); err != nil {
 		return nil, err
 	}
 	return files, nil
@@ -405,21 +394,15 @@ func (q *QBittorrent) SetFilePriority(ctx context.Context, hash string, index, p
 }
 
 func (q *QBittorrent) UpdateTrackers(ctx context.Context, trackers []string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, q.endpoint("/api/v2/app/preferences"), nil)
+	response, err := q.call(ctx, http.MethodGet, "/api/v2/app/preferences", nil, nil)
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent preferences returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent preferences returned HTTP %d", response.Status)
 	}
 	var preferences map[string]any
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&preferences); err != nil {
+	if err := response.JSON(&preferences); err != nil {
 		return err
 	}
 	preferences["add_trackers"] = strings.Join(trackers, "\n")
@@ -431,33 +414,15 @@ func (q *QBittorrent) UpdateTrackers(ctx context.Context, trackers []string) err
 	return q.postForm(ctx, "/api/v2/app/setPreferences", url.Values{"json": []string{string(body)}})
 }
 func (q *QBittorrent) postForm(ctx context.Context, path string, form url.Values) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint(path), strings.NewReader(form.Encode()))
+	response, err := q.call(ctx, http.MethodPost, path,
+		http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}}, []byte(form.Encode()))
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent %s returned HTTP %d", path, response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent %s returned HTTP %d", path, response.Status)
 	}
 	return nil
-}
-
-func (q *QBittorrent) authorize(request *http.Request) {
-	if q.APIKey != "" {
-		request.Header.Set("Authorization", "Bearer "+q.APIKey)
-	}
-	q.mu.RLock()
-	cookie := q.sessionCookie
-	q.mu.RUnlock()
-	if cookie != "" {
-		request.Header.Set("Cookie", cookie)
-	}
 }
 
 // AddMultipart is retained for torrent-file sources; magnet/remote URL adds
@@ -480,19 +445,13 @@ func (q *QBittorrent) AddMultipart(ctx context.Context, fields map[string]string
 	if err := writer.Close(); err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, q.endpoint("/api/v2/torrents/add"), &body)
+	response, err := q.call(ctx, http.MethodPost, "/api/v2/torrents/add",
+		http.Header{"Content-Type": []string{writer.FormDataContentType()}}, body.Bytes())
 	if err != nil {
 		return err
 	}
-	q.authorize(request)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response, err := q.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent multipart add returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("qBittorrent multipart add returned HTTP %d", response.Status)
 	}
 	return nil
 }

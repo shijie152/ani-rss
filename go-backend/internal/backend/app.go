@@ -31,12 +31,12 @@ import (
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/gateway"
-	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
 	"github.com/shijie152/ani-rss/go-backend/internal/mcp"
 	"github.com/shijie152/ani-rss/go-backend/internal/media"
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/notification"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/ownership"
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
 	"github.com/shijie152/ani-rss/go-backend/internal/scheduler"
@@ -142,6 +142,10 @@ func New(options Options) (*App, error) {
 		handlers = &teeHandler{first: handlers, second: logger.Handler()}
 	}
 	logger = slog.New(handlers)
+	// Long-lived components take a client that follows the live configuration,
+	// so a proxy the user turns on reaches notifications and the release check
+	// without restarting the service.
+	thirdParty := outbound.Watch(manager.Snapshot, logger)
 	if options.Version != "" {
 		if err := manager.Update(model.Config{"version": options.Version}); err != nil {
 			_ = logFile.Close()
@@ -150,7 +154,7 @@ func New(options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), nil, logger), sourceCache: cache.New[[]byte](256, nil), metadataCache: metadata.NewCache(512), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown, restart: options.Restart}
+	app := &App{store: applicationStore, history: applicationStore, tasks: applicationStore, config: manager, auth: auth.New(manager), ownership: locks, subscriptions: subscription.NewService(applicationStore, manager, items), configDir: applicationStore.Directory(), logger: logger, logBuffer: logs, logFile: logFile, version: options.Version, notifications: notification.New(manager, applicationStore.Directory(), thirdParty, logger), sourceCache: cache.New[[]byte](256, nil), metadataCache: metadata.NewCache(512), ownedDomains: ownedDomains, swagger: options.SwaggerEnabled, shutdown: options.Shutdown, restart: options.Restart}
 	app.metadataCache.WithBackground(app.runBackground)
 	app.logger.Info("Go backend initialized")
 	app.subscriptions.ConfigureSideEffects(func(ctx context.Context) (subscription.TaskManager, error) {
@@ -198,7 +202,7 @@ func New(options Options) (*App, error) {
 		return nil, err
 	}
 	if strings.TrimSpace(options.UpdateEndpoint) != "" && options.Version != "" && options.Version != "dev" {
-		app.updater = &update.Client{Endpoint: options.UpdateEndpoint, Version: options.Version, Token: appconfig.String(manager.Snapshot(), "githubToken")}
+		app.updater = &update.Client{Endpoint: options.UpdateEndpoint, Version: options.Version, Token: appconfig.String(manager.Snapshot(), "githubToken"), Outbound: thirdParty}
 	}
 	if options.MCPEnabled {
 		app.mcp = mcp.New(mcp.Config{Version: options.Version, Authorize: app.auth.APIKey, Tools: app.mcpTools()})
@@ -219,17 +223,17 @@ type components struct {
 	app *App
 }
 
-// HTTPClient assembles an HTTP client from the given configuration snapshot.
-// Callers needing a client from a snapshot other than the app's current config
-// (proxy test, RSS conversion) go through here instead of calling
-// httpclient.New themselves.
-func (c *components) HTTPClient(cfg model.Config) (*http.Client, error) {
-	return httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+// Outbound assembles the third-party entry point for the given configuration
+// snapshot. Callers needing policy from a snapshot other than the app's current
+// config (proxy test, RSS conversion) go through here instead of building it
+// themselves, which is what kept the proxy from reaching every call.
+func (c *components) Outbound(cfg model.Config) (*outbound.Client, error) {
+	return outbound.FromConfig(cfg, c.app.logger)
 }
 
 // DownloaderAdapter assembles the downloader adapter for the given snapshot.
 func (c *components) DownloaderAdapter(cfg model.Config) (downloader.Adapter, error) {
-	client, err := c.HTTPClient(cfg)
+	client, err := c.Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +244,7 @@ func (c *components) DownloaderAdapter(cfg model.Config) (downloader.Adapter, er
 func (c *components) Coordinator() (*rss.Coordinator, error) {
 	app := c.app
 	cfg := app.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	client, err := c.Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +252,7 @@ func (c *components) Coordinator() (*rss.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rss.Coordinator{Config: app.config, Subscriptions: app.subscriptions, History: app.history, HTTPClient: client, ConfigDir: app.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
+	return &rss.Coordinator{Config: app.config, Subscriptions: app.subscriptions, History: app.history, Outbound: client, ConfigDir: app.configDir, Retry: appconfig.Int(cfg, "downloadRetry"), QB: adapter,
 		Notify: func(ctx context.Context, ani model.Ani, resource *model.Resource, status, text string) error {
 			return app.notifications.Dispatch(ctx, notification.Event{Ani: ani, Resource: resource, Status: status, Text: text})
 		}}, nil
@@ -257,7 +261,7 @@ func (c *components) Coordinator() (*rss.Coordinator, error) {
 // MetadataClient assembles the metadata client for the current configuration.
 func (c *components) MetadataClient() (*metadata.Client, error) {
 	cfg := c.app.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	client, err := c.Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -766,21 +770,17 @@ func (a *App) testProxy(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "代理配置格式异常: "+err.Error())
 		return
 	}
-	client, err := a.Components().HTTPClient(input)
+	client, err := a.Components().Outbound(input)
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
 	started := time.Now()
 	result := map[string]any{"status": 0, "title": "", "time": int64(0)}
-	response, err := client.Get(target.String())
+	response, err := client.Do(r.Context(), outbound.Call{Service: "proxy-test", URL: target.String(), MaxBytes: 2 << 20})
 	if err == nil {
-		defer response.Body.Close()
-		result["status"] = response.StatusCode
-		body, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
-		if readErr == nil {
-			result["title"] = pageTitle(string(body))
-		}
+		result["status"] = response.Status
+		result["title"] = pageTitle(string(response.Body))
 	}
 	result["time"] = time.Since(started).Milliseconds()
 	if err != nil {
@@ -967,7 +967,7 @@ func (a *App) downloadPath(w http.ResponseWriter, r *http.Request) {
 func (c *components) sourceClientContext(ctx context.Context) (*source.Client, error) {
 	app := c.app
 	cfg := app.config.Snapshot()
-	client, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	client, err := c.Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -980,7 +980,7 @@ func (c *components) sourceClientContext(ctx context.Context) (*source.Client, e
 		BangumiAPI:      defaultString(appconfig.String(cfg, "bgmApi"), "https://api.bgm.tv"),
 		BGMCoverURL:     "https://cache.wushuo.top/bgm/cover",
 		Config:          cfg,
-		HTTPClient:      client,
+		Outbound:        client,
 		Retries:         appconfig.Int(cfg, "downloadRetry"),
 		Subscriptions:   app.subscriptions.Items,
 		Cache:           app.sourceCache,
@@ -1255,11 +1255,11 @@ func (a *App) rssToAni(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) rssConversionResources(ctx context.Context, feedURL string, item *model.Ani) ([]model.Resource, error) {
 	cfg := a.config.Snapshot()
-	client, err := a.Components().HTTPClient(cfg)
+	client, err := a.Components().Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}
-	intake := &rss.Intake{Config: a.config, HTTPClient: client, Retry: appconfig.Int(cfg, "downloadRetry")}
+	intake := &rss.Intake{Config: a.config, Outbound: client, Retry: appconfig.Int(cfg, "downloadRetry")}
 	resources, err := intake.CollectFeed(ctx, *item, rss.Feed{URL: feedURL, Subgroup: item.Subgroup, Master: true})
 	if err != nil {
 		return nil, err
@@ -1754,26 +1754,30 @@ func (a *App) getEmbyViews(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, http.StatusInternalServerError, nil, "embyApiKey 为空")
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, host+"/Library/MediaFolders", nil)
+	client, clientErr := a.Components().Outbound(a.config.Snapshot())
+	if clientErr != nil {
+		writeResult(w, http.StatusInternalServerError, nil, clientErr.Error())
+		return
+	}
+	response, err := client.Do(r.Context(), outbound.Call{
+		Service:  "emby",
+		Method:   http.MethodGet,
+		URL:      host + "/Library/MediaFolders",
+		Header:   http.Header{"X-Emby-Token": []string{token}},
+		MaxBytes: 4 << 20,
+	})
 	if err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	request.Header.Set("X-Emby-Token", token)
-	response, err := a.notifications.Client.Do(request)
-	if err != nil {
-		writeResult(w, http.StatusInternalServerError, nil, err.Error())
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeResult(w, http.StatusInternalServerError, nil, fmt.Sprintf("Emby HTTP %d", response.StatusCode))
+	if !response.OK() {
+		writeResult(w, http.StatusInternalServerError, nil, fmt.Sprintf("Emby HTTP %d", response.Status))
 		return
 	}
 	var body struct {
 		Items []map[string]any `json:"Items"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&body); err != nil {
+	if err := response.JSON(&body); err != nil {
 		writeResult(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
@@ -1881,7 +1885,7 @@ func (c *components) mediaService() (*media.Service, error) {
 		return nil, err
 	}
 	cfg := app.config.Snapshot()
-	requestClient, err := httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
+	requestClient, err := c.Outbound(cfg)
 	if err != nil {
 		return nil, err
 	}

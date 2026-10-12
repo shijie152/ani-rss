@@ -11,6 +11,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestResourceCacheIsolatedAndDeletable(t *testing.T) {
@@ -34,7 +35,7 @@ func TestResourceCacheIsolatedAndDeletable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "torrent-bytes") }))
 	defer server.Close()
 	torrentResource := model.Resource{InfoHash: "DEF", TorrentURL: server.URL + "/file.torrent", DownloadURL: server.URL + "/file.torrent"}
-	if err := rss.SaveResourceCache(context.Background(), server.Client(), root, ani, torrentResource); err != nil {
+	if err := rss.SaveResourceCache(context.Background(), testutil.OutboundClient(server.Client()), root, ani, torrentResource); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "torrents", ani.ID, "def.torrent"))

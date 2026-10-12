@@ -14,7 +14,7 @@ run_go() {
 	fi
 }
 
-for package in rss torrent source metadata subscription; do
+for package in rss torrent source metadata subscription outbound; do
 	printf 'Mutation testing internal/%s\n' "${package}"
 	run_go run "github.com/go-gremlins/gremlins/cmd/gremlins@${gremlins_version}" unleash "./internal/${package}" --workers=2
 done

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // InstallLoopbackNetworkGuard makes every client based on http.DefaultTransport
@@ -58,6 +60,17 @@ func LocalHTTPClient(timeout time.Duration) *http.Client {
 
 type localOnlyTransport struct {
 	base http.RoundTripper
+}
+
+// OutboundClient points the production third-party entry point at a test
+// server, so a test can stand in for Mikan, TMDB or a downloader without
+// handing a production module a bare *http.Client.
+func OutboundClient(client *http.Client) *outbound.Client {
+	options := outbound.Options{}
+	if client != nil {
+		options.Transport = client.Transport
+	}
+	return outbound.New(options)
 }
 
 func (t localOnlyTransport) RoundTrip(request *http.Request) (*http.Response, error) {

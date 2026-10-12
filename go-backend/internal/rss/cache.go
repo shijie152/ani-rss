@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 func resourceCacheDir(configDir string, ani model.Ani) string {
@@ -29,7 +29,7 @@ func HasCachedResource(configDir string, ani model.Ani, resource model.Resource)
 	return false
 }
 
-func SaveResourceCache(ctx context.Context, client *http.Client, configDir string, ani model.Ani, resource model.Resource) error {
+func SaveResourceCache(ctx context.Context, client *outbound.Client, configDir string, ani model.Ani, resource model.Resource) error {
 	if strings.TrimSpace(resource.InfoHash) == "" {
 		return errors.New("资源 hash 为空")
 	}
@@ -48,24 +48,19 @@ func SaveResourceCache(ctx context.Context, client *http.Client, configDir strin
 	if strings.HasPrefix(strings.ToLower(address), "http://") || strings.HasPrefix(strings.ToLower(address), "https://") {
 		ext = ".torrent"
 		if client == nil {
-			client = &http.Client{}
+			return errors.New("资源客户端未配置")
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		downloaded, err := client.Read(ctx, outbound.Call{
+			Service:      "resource",
+			Method:       http.MethodGet,
+			URL:          address,
+			MaxBytes:     64 << 20,
+			StatusPrefix: "资源服务返回 ",
+		})
 		if err != nil {
 			return err
 		}
-		response, err := client.Do(request)
-		if err != nil {
-			return err
-		}
-		defer response.Body.Close()
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return fmt.Errorf("资源服务返回 HTTP %d", response.StatusCode)
-		}
-		data, err = io.ReadAll(io.LimitReader(response.Body, 64<<20))
-		if err != nil {
-			return err
-		}
+		data = downloaded
 	}
 	if len(data) == 0 {
 		return errors.New("资源内容为空")

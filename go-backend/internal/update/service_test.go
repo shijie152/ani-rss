@@ -9,8 +9,14 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 	"github.com/shijie152/ani-rss/go-backend/internal/update"
 )
+
+// outboundClient is the third-party entry point the backend wires in
+// production; the tests leave the transport at the guarded default.
+func outboundClient() *outbound.Client { return testutil.OutboundClient(nil) }
 
 func TestCheckSelectsPlatformAssetAndComputesUpdatePolicy(t *testing.T) {
 	archive := []byte("release archive")
@@ -33,7 +39,7 @@ func TestCheckSelectsPlatformAssetAndComputesUpdatePolicy(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := &update.Client{Endpoint: server.URL, Version: "3.2.31"}
+	client := &update.Client{Endpoint: server.URL, Version: "3.2.31", Outbound: outboundClient()}
 	info, err := client.Check(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +55,7 @@ func TestCheckDoesNotOfferMissingOrOlderRelease(t *testing.T) {
 	}))
 	defer server.Close()
 
-	info, err := (&update.Client{Endpoint: server.URL, Version: "3.2.31"}).Check(t.Context())
+	info, err := (&update.Client{Endpoint: server.URL, Version: "3.2.31", Outbound: outboundClient()}).Check(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

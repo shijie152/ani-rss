@@ -12,6 +12,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestIntakeCollectUsesTheSamePipelineForPrimaryAndStandbyFeeds(t *testing.T) {
@@ -38,7 +39,7 @@ func TestIntakeCollectUsesTheSamePipelineForPrimaryAndStandbyFeeds(t *testing.T)
 	if err := config.Update(model.Config{"standbyRss": true}); err != nil {
 		t.Fatal(err)
 	}
-	intake := &rss.Intake{Config: config, HTTPClient: server.Client(), Retry: 1}
+	intake := &rss.Intake{Config: config, Outbound: testutil.OutboundClient(server.Client()), Retry: 1}
 	items, err := intake.Collect(context.Background(), model.Ani{ID: "ani", Title: "Demo", URL: server.URL + "/primary", Subgroup: "Primary", StandbyRSSList: []model.StandbyRSS{{URL: server.URL + "/standby", Label: "Backup"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +72,7 @@ func TestIntakeCollectPreservesPartialResultsAndCancellation(t *testing.T) {
 	if err := config.Update(model.Config{"standbyRss": true}); err != nil {
 		t.Fatal(err)
 	}
-	intake := &rss.Intake{Config: config, HTTPClient: server.Client(), Retry: 1}
+	intake := &rss.Intake{Config: config, Outbound: testutil.OutboundClient(server.Client()), Retry: 1}
 	items, err := intake.Collect(context.Background(), model.Ani{Title: "Demo", URL: server.URL + "/bad", StandbyRSSList: []model.StandbyRSS{{URL: server.URL + "/good", Label: ""}}})
 	if err == nil || len(items) != 1 || items[0].InfoHash != "good" {
 		t.Fatalf("partial intake items=%#v err=%v", items, err)

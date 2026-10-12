@@ -16,6 +16,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/rss"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestParseAndMatchRSSRules(t *testing.T) {
@@ -85,7 +86,7 @@ func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
-	c := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	c := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}}
 	if _, err := c.Refresh(context.Background(), services.Items()[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,7 @@ func TestCoordinatorSubmitsOnceAndSurvivesRestart(t *testing.T) {
 	// A duplicate-only refresh must not look like a new download or rewrite
 	// progress based solely on the RSS contents.
 	servicesAgain := subscription.NewService(s, m, services.Items())
-	coordinatorAgain := &rss.Coordinator{Config: m, Subscriptions: servicesAgain, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	coordinatorAgain := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: m, Subscriptions: servicesAgain, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}}
 	if _, err := coordinatorAgain.Refresh(context.Background(), servicesAgain.Items()[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestCoordinatorFailsClosedWhenTaskInventoryFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
-	coordinator := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	coordinator := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}}
 	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err == nil {
 		t.Fatal("inventory failure was ignored")
 	}
@@ -192,7 +193,7 @@ func TestCoordinatorReconcilesTaskCreatedBeforeAddResponseFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
-	coordinator := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+	coordinator := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
 	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err != nil {
 		t.Fatalf("refresh with recoverable add response failure = %v", err)
 	}
@@ -240,7 +241,7 @@ func TestCoordinatorLogsInAndStartsRSSTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, m, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
-	c := &rss.Coordinator{Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}}
+	c := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: m, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}}
 	if _, err := c.Refresh(context.Background(), services.Items()[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestCoordinatorUsesStandbyRSSAndKeepsOtherSubscriptionsMoving(t *testing.T)
 		{ID: "fallback", Title: "Demo", URL: primary.URL, Subgroup: "Group", StandbyRSSList: []model.StandbyRSS{{Label: "Backup", URL: standby.URL}}, Enable: true},
 		{ID: "healthy", Title: "Other", URL: good.URL, Subgroup: "Group", Enable: true},
 	})
-	coordinator := &rss.Coordinator{Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+	coordinator := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
 
 	result, err := coordinator.RefreshAll(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
@@ -350,7 +351,7 @@ func TestCoordinatorWashesSameEpisodeStandbyTaskBeforePrimarySubmit(t *testing.T
 		t.Fatal(err)
 	}
 	services := subscription.NewService(s, config, []model.Ani{{ID: "one", Title: "Demo", URL: feed.URL, Subgroup: "Group", Enable: true}})
-	coordinator := &rss.Coordinator{Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
+	coordinator := &rss.Coordinator{Outbound: testutil.OutboundClient(nil), Config: config, Subscriptions: services, History: s, QB: &downloader.QBittorrent{Outbound: testutil.OutboundClient(nil), Host: qb.URL, APIKey: "qbt_test"}, Retry: 1}
 	if _, err := coordinator.Refresh(context.Background(), services.Items()[0]); err != nil {
 		t.Fatal(err)
 	}

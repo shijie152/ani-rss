@@ -7,23 +7,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 type Client struct {
-	Config     model.Config
-	HTTPClient *http.Client
-	Cache      *Cache
-	Retries    int
+	Config model.Config
+	// Outbound is the shared third-party entry point, so the proxy and timeout
+	// the user configured apply here too.
+	Outbound *outbound.Client
+	Cache    *Cache
+	Retries  int
 }
 
 // Keep the public fallback used by the Java release. Users can still replace
@@ -31,11 +31,13 @@ type Client struct {
 // legacy behavior of resolving TMDB during subscription creation.
 const defaultTMDBAPIKey = "450e4f651e1c93e31383e20f8e731e5f"
 
-func New(config model.Config, client *http.Client) *Client {
+func New(config model.Config, client *outbound.Client) *Client {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		// This constructor cannot report a failure, so a nil client selects the
+		// shared default policy; the application always passes the configured one.
+		client = outbound.New(outbound.Options{})
 	}
-	return &Client{Config: config, HTTPClient: client, Retries: 3}
+	return &Client{Config: config, Outbound: client, Retries: 3}
 }
 
 // WithCache attaches a process-local response cache. Metadata values are
@@ -282,43 +284,24 @@ func (c *Client) getJSON(ctx context.Context, target string, query url.Values) (
 }
 
 func (c *Client) getJSONRemote(ctx context.Context, target string) (map[string]any, error) {
-	attempts := c.Retries
-	if attempts < 1 {
-		attempts = 1
+	body, err := c.Outbound.Read(ctx, outbound.Call{
+		Service:      "metadata",
+		Method:       http.MethodGet,
+		URL:          target,
+		Header:       http.Header{"Accept": []string{"application/json"}},
+		MaxBytes:     16 << 20,
+		Attempts:     c.Retries,
+		RetryStatus:  outbound.RetryAnyStatus,
+		StatusPrefix: "metadata service returned ",
+	})
+	if err != nil {
+		return nil, err
 	}
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("Accept", "application/json")
-		request.Header.Set("User-Agent", "ani-rss-go")
-		response, err := c.HTTPClient.Do(request)
-		if err == nil {
-			var result map[string]any
-			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&result)
-			_ = response.Body.Close()
-			if decodeErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-				return result, nil
-			}
-			if decodeErr != nil {
-				lastErr = decodeErr
-			} else {
-				lastErr = fmt.Errorf("metadata service returned HTTP %d", response.StatusCode)
-			}
-		} else {
-			lastErr = err
-		}
-		if attempt+1 < attempts {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-			}
-		}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return result, nil
 }
 
 func normalizeTMDB(raw map[string]any, ova bool) model.Metadata {

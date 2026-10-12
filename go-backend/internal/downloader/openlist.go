@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // OpenList is the remote/offline downloader adapter. Unlike torrent clients,
@@ -21,7 +22,7 @@ import (
 // timeout.
 type OpenList struct {
 	Host, Token, Provider string
-	Client                *http.Client
+	Outbound              *outbound.Client
 	Timeout               time.Duration
 	Retries               int
 	PollInterval          time.Duration
@@ -80,7 +81,7 @@ func (o *OpenList) call(ctx context.Context, method, action string, payload any,
 		}
 		headers.Set("Content-Type", "application/json")
 	}
-	data, _, _, err := request(ctx, o.Client, method, endpoint(o.Host, "/api/"+strings.TrimLeft(action, "/")), headers, body)
+	data, _, _, err := request(ctx, o.Outbound, method, endpoint(o.Host, "/api/"+strings.TrimLeft(action, "/")), headers, body)
 	if err != nil {
 		return openListResponse{}, err
 	}

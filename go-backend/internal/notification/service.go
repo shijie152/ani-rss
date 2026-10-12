@@ -3,7 +3,6 @@
 package notification
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -27,6 +26,7 @@ import (
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 const (
@@ -51,7 +51,7 @@ type Event struct {
 type Dispatcher struct {
 	Config    appconfig.Reader
 	ConfigDir string
-	Client    *http.Client
+	Client    *outbound.Client
 	Logger    *slog.Logger
 	mu        sync.Mutex
 	seen      map[string]time.Time
@@ -161,10 +161,10 @@ func telegramChat(raw map[string]any) map[string]any {
 	return chat
 }
 
-func New(config appconfig.Reader, configDir string, client *http.Client, logger *slog.Logger) *Dispatcher {
-	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
-	}
+// New builds the dispatcher. The caller supplies the outbound client so the
+// notification targets inherit the proxy and timeout the user configured;
+// a missing client is reported as a failure instead of silently falling back.
+func New(config appconfig.Reader, configDir string, client *outbound.Client, logger *slog.Logger) *Dispatcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -628,34 +628,29 @@ func (d *Dispatcher) embyRefresh(ctx context.Context, cfg map[string]any) error 
 	return nil
 }
 
-func doRequest(ctx context.Context, client *http.Client, method, address string, headers http.Header, body []byte) ([]byte, int, http.Header, error) {
+// doRequest keeps the legacy contract of handing back the body, status and
+// headers so each notification target can report a failure its own way.
+func doRequest(ctx context.Context, client *outbound.Client, method, address string, headers http.Header, body []byte) ([]byte, int, http.Header, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		return nil, 0, nil, errors.New("通知客户端未配置")
 	}
-	request, err := http.NewRequestWithContext(ctx, method, address, bytes.NewReader(body))
+	response, err := client.Do(ctx, outbound.Call{
+		Service:  "notification",
+		Method:   method,
+		URL:      address,
+		Header:   headers,
+		Body:     body,
+		MaxBytes: 32 << 20,
+	})
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	for key, values := range headers {
-		for _, value := range values {
-			request.Header.Add(key, value)
-		}
+	if !response.OK() {
+		return response.Body, response.Status, response.Header, fmt.Errorf("HTTP %d: %s", response.Status, strings.TrimSpace(string(response.Body)))
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
-	if err != nil {
-		return nil, response.StatusCode, response.Header, err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return data, response.StatusCode, response.Header, fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
-	}
-	return data, response.StatusCode, response.Header, nil
+	return response.Body, response.Status, response.Header, nil
 }
-func jsonRequest(ctx context.Context, client *http.Client, address string, payload any) ([]byte, int, http.Header, error) {
+func jsonRequest(ctx context.Context, client *outbound.Client, address string, payload any) ([]byte, int, http.Header, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, nil, err

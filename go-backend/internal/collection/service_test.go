@@ -16,6 +16,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/collection"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestPreviewFiltersRenamesAndDetectsSubgroup(t *testing.T) {
@@ -85,7 +86,7 @@ func TestStartCollectionUsesQBTorrentFileReconciliation(t *testing.T) {
 	}))
 	defer server.Close()
 	config := &fakeConfig{value: model.Config{"renameTemplate": "[${subgroup}] ${title} S${seasonFormat}E${episodeFormat}", "downloadToolHost": server.URL}}
-	qb := &downloader.QBittorrent{Host: server.URL, APIKey: "test", Client: server.Client()}
+	qb := &downloader.QBittorrent{Host: server.URL, APIKey: "test", Outbound: testutil.OutboundClient(server.Client())}
 	service := &collection.Service{Config: config, Download: qb, Sleep: func(time.Duration) {}}
 	info := model.CollectionInfo{Torrent: base64.StdEncoding.EncodeToString(data), Ani: model.Ani{Title: "Demo", Season: 1, Subgroup: "Group", Offset: 1, CustomDownloadPathTemplate: "/media/Demo"}}
 	if err := service.Start(context.Background(), info); err != nil {

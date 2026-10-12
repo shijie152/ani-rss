@@ -10,6 +10,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 // TestConfiguredDownloaderSmoke is opt-in because the repository must not
@@ -41,7 +42,7 @@ func TestConfiguredDownloaderSmoke(t *testing.T) {
 			if testCase.provider != "" {
 				cfg["provider"] = os.Getenv(testCase.provider)
 			}
-			adapter, err := downloader.New(cfg, nil)
+			adapter, err := downloader.New(cfg, testutil.OutboundClient(nil))
 			if err != nil {
 				t.Fatal(err)
 			}

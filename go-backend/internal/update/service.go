@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,13 +21,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 type Client struct {
 	Endpoint string
 	Version  string
 	Token    string
-	HTTP     *http.Client
+	// Outbound is the shared third-party entry point, so the release check
+	// honours the configured proxy like every other outbound call.
+	Outbound *outbound.Client
 }
 
 type Info struct {
@@ -62,29 +65,26 @@ func (c *Client) Check(ctx context.Context) (Info, error) {
 	if strings.TrimSpace(c.Endpoint) == "" {
 		return info, nil
 	}
-	client := c.HTTP
+	client := c.Outbound
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		return info, errors.New("更新客户端未配置")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint, nil)
+	response, err := client.Do(ctx, outbound.Call{
+		Service:  "update",
+		Method:   http.MethodGet,
+		URL:      c.Endpoint,
+		Header:   c.headers("application/vnd.github+json"),
+		Timeout:  5 * time.Second,
+		MaxBytes: 4 << 20,
+	})
 	if err != nil {
 		return info, err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("User-Agent", "ani-rss-go")
-	if strings.TrimSpace(c.Token) != "" {
-		request.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return info, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return info, fmt.Errorf("release check returned HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return info, fmt.Errorf("release check returned HTTP %d", response.Status)
 	}
 	var latest release
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&latest); err != nil {
+	if err := response.JSON(&latest); err != nil {
 		return info, fmt.Errorf("decode release metadata: %w", err)
 	}
 	info.Version = strings.TrimPrefix(strings.TrimPrefix(latest.TagName, "v"), "V")
@@ -111,6 +111,19 @@ func (c *Client) Check(ctx context.Context) (Info, error) {
 	return info, nil
 }
 
+// headers returns the GitHub request headers. The release assets use the same
+// token as the release check, and the Accept header selects the documented API.
+func (c *Client) headers(accept string) http.Header {
+	header := http.Header{}
+	if accept != "" {
+		header.Set("Accept", accept)
+	}
+	if strings.TrimSpace(c.Token) != "" {
+		header.Set("Authorization", "Bearer "+c.Token)
+	}
+	return header
+}
+
 // Install downloads, validates and stages the release. Unix binaries can be
 // atomically replaced while running. Windows receives a detached cmd helper
 // because the running executable is locked by the OS.
@@ -118,19 +131,17 @@ func (c *Client) Install(ctx context.Context, info Info) error {
 	if !info.Update || strings.TrimSpace(info.URL) == "" {
 		return errors.New("当前版本无需更新")
 	}
-	client := c.HTTP
+	client := c.Outbound
 	if client == nil {
-		client = &http.Client{Timeout: 2 * time.Minute}
+		return errors.New("更新客户端未配置")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("User-Agent", "ani-rss-go")
-	if strings.TrimSpace(c.Token) != "" {
-		request.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	response, err := client.Do(request)
+	response, err := client.Stream(ctx, outbound.Call{
+		Service: "update",
+		Method:  http.MethodGet,
+		URL:     info.URL,
+		Header:  c.headers(""),
+		Timeout: 2 * time.Minute,
+	})
 	if err != nil {
 		return err
 	}

@@ -1,19 +1,18 @@
 package downloader
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // Adapter is the stable downloader boundary used by RSS and HTTP handlers.
@@ -34,7 +33,7 @@ type Adapter interface {
 
 // New returns the adapter selected by the same downloadToolType value used by
 // the existing Vue configuration page.
-func New(cfg model.Config, client *http.Client) (Adapter, error) {
+func New(cfg model.Config, client *outbound.Client) (Adapter, error) {
 	typeName := strings.ToLower(strings.TrimSpace(appconfig.String(cfg, "downloadToolType")))
 	switch typeName {
 	case "", "qbittorrent":
@@ -46,7 +45,7 @@ func New(cfg model.Config, client *http.Client) (Adapter, error) {
 		}
 		return &QBittorrent{
 			Host: appconfig.String(cfg, "downloadToolHost"), Username: username, Password: password,
-			APIKey: apiKey, Client: client, ContentLayout: appconfig.String(cfg, "qbContentLayout"),
+			APIKey: apiKey, Outbound: client, ContentLayout: appconfig.String(cfg, "qbContentLayout"),
 			UseDownloadPath:          appconfig.Bool(cfg, "qbUseDownloadPath"),
 			RatioLimit:               int64(appconfig.Int(cfg, "ratioLimit")),
 			SeedingTimeLimit:         int64(appconfig.Int(cfg, "seedingTimeLimit")),
@@ -55,13 +54,13 @@ func New(cfg model.Config, client *http.Client) (Adapter, error) {
 			DlLimit:                  int64(appconfig.Int(cfg, "dlLimit")) * 1024,
 		}, nil
 	case "transmission":
-		return &Transmission{Host: appconfig.String(cfg, "downloadToolHost"), Username: appconfig.String(cfg, "downloadToolUsername"), Password: appconfig.String(cfg, "downloadToolPassword"), Client: client}, nil
+		return &Transmission{Host: appconfig.String(cfg, "downloadToolHost"), Username: appconfig.String(cfg, "downloadToolUsername"), Password: appconfig.String(cfg, "downloadToolPassword"), Outbound: client}, nil
 	case "aria2":
-		return &Aria2{Host: appconfig.String(cfg, "downloadToolHost"), Token: appconfig.String(cfg, "downloadToolPassword"), Client: client}, nil
+		return &Aria2{Host: appconfig.String(cfg, "downloadToolHost"), Token: appconfig.String(cfg, "downloadToolPassword"), Outbound: client}, nil
 	case "openlist":
 		return &OpenList{
 			Host: appconfig.String(cfg, "downloadToolHost"), Token: appconfig.String(cfg, "downloadToolPassword"),
-			Provider: appconfig.String(cfg, "provider"), Client: client,
+			Provider: appconfig.String(cfg, "provider"), Outbound: client,
 			Timeout:      time.Duration(appconfig.Int(cfg, "openListDownloadTimeout")) * time.Minute,
 			Retries:      appconfig.Int(cfg, "openListDownloadRetryNumber"),
 			PollInterval: 2 * time.Second,
@@ -71,57 +70,33 @@ func New(cfg model.Config, client *http.Client) (Adapter, error) {
 	}
 }
 
-func clientOrDefault(client *http.Client) *http.Client {
-	if client != nil {
-		return client
-	}
-	return &http.Client{Timeout: 20 * time.Second}
-}
-
 // request performs bounded retries for transport failures and 5xx responses.
 // Request bodies are retained as bytes, so a retry cannot accidentally send an
 // empty JSON-RPC body after the first attempt.
-func request(ctx context.Context, client *http.Client, method, endpoint string, headers http.Header, body []byte) ([]byte, int, http.Header, error) {
-	client = clientOrDefault(client)
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		for key, values := range headers {
-			for _, value := range values {
-				req.Header.Add(key, value)
-			}
-		}
-		response, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-		} else {
-			data, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
-			_ = response.Body.Close()
-			if readErr != nil {
-				lastErr = readErr
-			} else if response.StatusCode >= 500 && attempt < 2 {
-				lastErr = fmt.Errorf("HTTP %d", response.StatusCode)
-			} else if response.StatusCode < 200 || response.StatusCode >= 300 {
-				return data, response.StatusCode, response.Header, fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
-			} else {
-				return data, response.StatusCode, response.Header, nil
-			}
-		}
-		if attempt < 2 {
-			select {
-			case <-ctx.Done():
-				return nil, 0, nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-			}
-		}
+func request(ctx context.Context, client *outbound.Client, method, endpoint string, headers http.Header, body []byte) ([]byte, int, http.Header, error) {
+	if client == nil {
+		return nil, 0, nil, errors.New("下载器客户端未配置")
 	}
-	return nil, 0, nil, lastErr
+	response, err := client.Do(ctx, outbound.Call{
+		Service:     "downloader",
+		Method:      method,
+		URL:         endpoint,
+		Header:      headers,
+		Body:        body,
+		MaxBytes:    32 << 20,
+		Attempts:    3,
+		RetryStatus: outbound.RetryServerErrors,
+	})
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if !response.OK() {
+		return response.Body, response.Status, response.Header, fmt.Errorf("HTTP %d: %s", response.Status, strings.TrimSpace(string(response.Body)))
+	}
+	return response.Body, response.Status, response.Header, nil
 }
 
-func jsonRequest(ctx context.Context, client *http.Client, endpoint string, headers http.Header, payload any) ([]byte, http.Header, error) {
+func jsonRequest(ctx context.Context, client *outbound.Client, endpoint string, headers http.Header, payload any) ([]byte, http.Header, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, err
@@ -186,7 +161,7 @@ var errUnsupported = errors.New("当前下载器不支持此操作")
 // resources use Magnet for magnets and TorrentURL/DownloadURL for torrent
 // files; the latter must be sent as metainfo to RPC clients rather than as a
 // normal HTTP download URI.
-func torrentBytes(ctx context.Context, client *http.Client, resource model.Resource) ([]byte, error) {
+func torrentBytes(ctx context.Context, client *outbound.Client, resource model.Resource) ([]byte, error) {
 	address := strings.TrimSpace(resource.TorrentURL)
 	if address == "" {
 		address = strings.TrimSpace(resource.DownloadURL)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestTransmissionAdapterSessionAndLifecycle(t *testing.T) {
@@ -56,7 +57,7 @@ func TestTransmissionAdapterSessionAndLifecycle(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	adapter := &downloader.Transmission{Host: server.URL, Username: "user", Password: "pass"}
+	adapter := &downloader.Transmission{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, Username: "user", Password: "pass"}
 	ctx := context.Background()
 	if err := adapter.Login(ctx); err != nil {
 		t.Fatal(err)
@@ -122,7 +123,7 @@ func TestAria2AdapterJSONRPCAndStatusMapping(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	adapter := &downloader.Aria2{Host: server.URL, Token: "secret"}
+	adapter := &downloader.Aria2{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, Token: "secret"}
 	ctx := context.Background()
 	if err := adapter.Login(ctx); err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestOpenListAdapterRetriesAndMapsTerminalFailures(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	adapter := &downloader.OpenList{Host: server.URL, Token: "openlist-secret", Provider: "115 Open", Timeout: time.Second, Retries: 2, PollInterval: time.Millisecond}
+	adapter := &downloader.OpenList{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, Token: "openlist-secret", Provider: "115 Open", Timeout: time.Second, Retries: 2, PollInterval: time.Millisecond}
 	ctx := context.Background()
 	if err := adapter.Login(ctx); err != nil {
 		t.Fatal(err)
@@ -208,7 +209,7 @@ func TestOpenListAdapterRetriesAndMapsTerminalFailures(t *testing.T) {
 		_, _ = w.Write([]byte(`{"code":200,"data":{}}`))
 	}))
 	defer serverFail.Close()
-	failed := &downloader.OpenList{Host: serverFail.URL, Token: "secret", Provider: "115 Open", Timeout: time.Second, Retries: 0, PollInterval: time.Millisecond}
+	failed := &downloader.OpenList{Outbound: testutil.OutboundClient(serverFail.Client()), Host: serverFail.URL, Token: "secret", Provider: "115 Open", Timeout: time.Second, Retries: 0, PollInterval: time.Millisecond}
 	if _, err := failed.WaitForCompletion(ctx, "bad", time.Millisecond); err == nil {
 		t.Fatal("OpenList permanent error was ignored")
 	}
@@ -228,7 +229,7 @@ func TestDownloaderAdaptersMapAuthenticationFailures(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer transmission.Close()
-	if err := (&downloader.Transmission{Host: transmission.URL, Username: "u", Password: "p"}).Login(context.Background()); err == nil {
+	if err := (&downloader.Transmission{Outbound: testutil.OutboundClient(transmission.Client()), Host: transmission.URL, Username: "u", Password: "p"}).Login(context.Background()); err == nil {
 		t.Fatal("Transmission authentication failure was ignored")
 	}
 
@@ -237,7 +238,7 @@ func TestDownloaderAdaptersMapAuthenticationFailures(t *testing.T) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"ani-rss","error":{"code":-1,"message":"invalid secret"}}`))
 	}))
 	defer aria.Close()
-	if err := (&downloader.Aria2{Host: aria.URL, Token: "wrong"}).Login(context.Background()); err == nil {
+	if err := (&downloader.Aria2{Outbound: testutil.OutboundClient(aria.Client()), Host: aria.URL, Token: "wrong"}).Login(context.Background()); err == nil {
 		t.Fatal("Aria2 authentication failure was ignored")
 	}
 
@@ -246,7 +247,7 @@ func TestDownloaderAdaptersMapAuthenticationFailures(t *testing.T) {
 		_, _ = w.Write([]byte(`{"code":401,"message":"invalid token"}`))
 	}))
 	defer openList.Close()
-	if err := (&downloader.OpenList{Host: openList.URL, Token: "wrong", Provider: "115 Open"}).Login(context.Background()); err == nil {
+	if err := (&downloader.OpenList{Outbound: testutil.OutboundClient(openList.Client()), Host: openList.URL, Token: "wrong", Provider: "115 Open"}).Login(context.Background()); err == nil {
 		t.Fatal("OpenList authentication failure was ignored")
 	}
 }
@@ -262,7 +263,7 @@ func TestDownloaderRetriesTransientServerFailuresAndHonorsTimeout(t *testing.T) 
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"ani-rss","result":{"numActive":"0"}}`))
 	}))
 	defer server.Close()
-	if err := (&downloader.Aria2{Host: server.URL, Token: "secret"}).Login(context.Background()); err != nil {
+	if err := (&downloader.Aria2{Outbound: testutil.OutboundClient(server.Client()), Host: server.URL, Token: "secret"}).Login(context.Background()); err != nil {
 		t.Fatalf("Aria2 transient retry = %v", err)
 	}
 	if attempts.Load() != 3 {
@@ -279,7 +280,7 @@ func TestDownloaderRetriesTransientServerFailuresAndHonorsTimeout(t *testing.T) 
 	defer slow.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if err := (&downloader.OpenList{Host: slow.URL, Token: "secret", Provider: "115 Open"}).Login(ctx); err == nil {
+	if err := (&downloader.OpenList{Outbound: testutil.OutboundClient(slow.Client()), Host: slow.URL, Token: "secret", Provider: "115 Open"}).Login(ctx); err == nil {
 		t.Fatal("OpenList timeout was ignored")
 	}
 }

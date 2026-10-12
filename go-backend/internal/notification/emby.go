@@ -1,11 +1,9 @@
 package notification
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +12,7 @@ import (
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/source"
 )
 
@@ -100,19 +99,19 @@ func (d *Dispatcher) ProcessEmbyWebhook(ctx context.Context, payload map[string]
 		base = "https://api.bgm.tv"
 	}
 	form := url.Values{"subject_id": []string{subjectID}, "type": []string{"0"}, "limit": []string{"1000"}, "offset": []string{"0"}}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v0/episodes", strings.NewReader(form.Encode()))
+	response, err := client.Do(ctx, outbound.Call{
+		Service:  "bangumi",
+		Method:   http.MethodPost,
+		URL:      base + "/v0/episodes",
+		Header:   http.Header{"Authorization": []string{"Bearer " + token}, "Content-Type": []string{"application/x-www-form-urlencoded"}},
+		Body:     []byte(form.Encode()),
+		MaxBytes: 4 << 20,
+	})
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Bangumi episodes HTTP %d", response.StatusCode)
+	if !response.OK() {
+		return fmt.Errorf("Bangumi episodes HTTP %d", response.Status)
 	}
 	var episodes struct {
 		Data []struct {
@@ -121,7 +120,7 @@ func (d *Dispatcher) ProcessEmbyWebhook(ctx context.Context, payload map[string]
 			Sort float64 `json:"sort"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&episodes); err != nil {
+	if err := response.JSON(&episodes); err != nil {
 		return err
 	}
 	episodeID := ""
@@ -136,39 +135,38 @@ func (d *Dispatcher) ProcessEmbyWebhook(ctx context.Context, payload map[string]
 	if episodeID == "" {
 		return nil
 	}
-	get, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/users/-/collections/-/episodes/"+url.PathEscape(episodeID), nil)
+	currentResponse, err := client.Do(ctx, outbound.Call{
+		Service:  "bangumi",
+		Method:   http.MethodGet,
+		URL:      base + "/v0/users/-/collections/-/episodes/" + url.PathEscape(episodeID),
+		Header:   http.Header{"Authorization": []string{"Bearer " + token}},
+		MaxBytes: 1 << 20,
+	})
 	if err != nil {
 		return err
 	}
-	get.Header.Set("Authorization", "Bearer "+token)
-	currentResponse, err := client.Do(get)
-	if err != nil {
-		return err
-	}
-	defer currentResponse.Body.Close()
 	var current struct {
 		Type int `json:"type"`
 	}
-	if currentResponse.StatusCode >= 200 && currentResponse.StatusCode < 300 {
-		_ = json.NewDecoder(io.LimitReader(currentResponse.Body, 1<<20)).Decode(&current)
+	if currentResponse.OK() {
+		_ = currentResponse.JSON(&current)
 	}
 	if current.Type == status {
 		return nil
 	}
 	body, _ := json.Marshal(map[string]int{"type": status})
-	put, err := http.NewRequestWithContext(ctx, http.MethodPut, base+"/v0/users/-/collections/-/episodes/"+url.PathEscape(episodeID), bytes.NewReader(body))
+	updated, err := client.Do(ctx, outbound.Call{
+		Service: "bangumi",
+		Method:  http.MethodPut,
+		URL:     base + "/v0/users/-/collections/-/episodes/" + url.PathEscape(episodeID),
+		Header:  http.Header{"Authorization": []string{"Bearer " + token}, "Content-Type": []string{"application/json"}},
+		Body:    body,
+	})
 	if err != nil {
 		return err
 	}
-	put.Header.Set("Authorization", "Bearer "+token)
-	put.Header.Set("Content-Type", "application/json")
-	updated, err := client.Do(put)
-	if err != nil {
-		return err
-	}
-	defer updated.Body.Close()
-	if updated.StatusCode < 200 || updated.StatusCode >= 300 {
-		return fmt.Errorf("Bangumi episode update HTTP %d", updated.StatusCode)
+	if !updated.OK() {
+		return fmt.Errorf("Bangumi episode update HTTP %d", updated.Status)
 	}
 	return nil
 }

@@ -26,8 +26,8 @@ import (
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
-	"github.com/shijie152/ani-rss/go-backend/internal/httpclient"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
 )
 
@@ -443,26 +443,24 @@ func (a *App) trackersUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trackers := map[string]bool{}
-	client, err := httpclientForConfig(cfg)
+	client, err := outbound.FromConfig(cfg, a.logger)
 	if err == nil {
 		for _, address := range urls {
 			address = strings.TrimSpace(address)
 			if address == "" {
 				continue
 			}
-			response, requestErr := client.Get(address)
+			response, requestErr := client.Do(r.Context(), outbound.Call{Service: "trackers", URL: address, MaxBytes: 8 << 20})
 			if requestErr != nil {
 				err = requestErr
 				break
 			}
 			contentType := response.Header.Get("Content-Type")
-			body, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-			response.Body.Close()
-			if response.StatusCode < 200 || response.StatusCode >= 300 || contentType == "" || !strings.Contains(strings.ToLower(contentType), "text/plain") || readErr != nil {
+			if !response.OK() || contentType == "" || !strings.Contains(strings.ToLower(contentType), "text/plain") {
 				err = fmt.Errorf("更新 trackers 失败: %s", address)
 				break
 			}
-			for _, line := range strings.Split(string(body), "\n") {
+			for _, line := range strings.Split(string(response.Body), "\n") {
 				line = strings.Trim(strings.TrimSpace(line), `"`)
 				lower := strings.ToLower(line)
 				if line != "" && (strings.HasPrefix(lower, "udp://") || strings.HasPrefix(lower, "wss://") || strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://")) {
@@ -498,10 +496,6 @@ func (a *App) trackersUpdate(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, nil, "success")
 }
 
-func httpclientForConfig(cfg model.Config) (*http.Client, error) {
-	return httpclient.New(cfg, time.Duration(appconfig.Int(cfg, "rssTimeout"))*time.Second)
-}
-
 func (a *App) proxyImage(w http.ResponseWriter, r *http.Request) {
 	encodedURL, queryErr := requiredQuery(r, "imgUrl")
 	if queryErr != nil {
@@ -529,27 +523,18 @@ func (a *App) proxyImage(w http.ResponseWriter, r *http.Request) {
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(imageURL)))
 	cachePath := filepath.Join(a.configDir, "img", string(hash[0]), hash+ext)
 	if info, statErr := os.Stat(cachePath); statErr != nil || !info.Mode().IsRegular() {
-		client, clientErr := httpclientForConfig(a.config.Snapshot())
+		client, clientErr := outbound.FromConfig(a.config.Snapshot(), a.logger)
 		if clientErr != nil {
 			writeResult(w, http.StatusInternalServerError, nil, clientErr.Error())
 			return
 		}
-		request, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
-		if requestErr != nil {
-			writeResult(w, http.StatusForbidden, nil, "图片地址格式异常")
-			return
-		}
-		response, requestErr := client.Do(request)
-		if requestErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
-			if response != nil {
-				response.Body.Close()
-			}
+		response, requestErr := client.Do(r.Context(), outbound.Call{Service: "image", URL: target.String(), MaxBytes: maxImageBytes + 1})
+		if requestErr != nil || !response.OK() {
 			writeResult(w, http.StatusBadGateway, nil, "图片下载失败")
 			return
 		}
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, maxImageBytes+1))
-		response.Body.Close()
-		if readErr != nil || len(data) > maxImageBytes {
+		data := response.Body
+		if len(data) > maxImageBytes {
 			writeResult(w, http.StatusRequestEntityTooLarge, nil, "图片过大")
 			return
 		}

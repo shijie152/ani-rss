@@ -5,19 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // Aria2 implements aria2's JSON-RPC endpoint. The configured password is the
 // RPC secret and is sent as the first token parameter on every call.
 type Aria2 struct {
 	Host, Token string
-	Client      *http.Client
+	Outbound    *outbound.Client
 }
 
 type ariaRPC struct {
@@ -64,7 +64,7 @@ func (a *Aria2) rpc(ctx context.Context, method string, params []any) (json.RawM
 	arguments := []any{"token:" + a.Token}
 	arguments = append(arguments, params...)
 	payload := ariaRPC{JSONRPC: "2.0", ID: "ani-rss", Method: method, Params: arguments}
-	data, _, err := jsonRequest(ctx, a.Client, endpoint(a.Host, "/jsonrpc"), nil, payload)
+	data, _, err := jsonRequest(ctx, a.Outbound, endpoint(a.Host, "/jsonrpc"), nil, payload)
 	if err != nil {
 		return nil, fmt.Errorf("Aria2 %s: %w", method, err)
 	}
@@ -90,7 +90,7 @@ func (a *Aria2) Add(ctx context.Context, resource model.Resource, savePath strin
 		_, err := a.rpc(ctx, "aria2.addUri", []any{[]string{uri}, map[string]any{"dir": savePath}})
 		return err
 	}
-	data, err := torrentBytes(ctx, a.Client, resource)
+	data, err := torrentBytes(ctx, a.Outbound, resource)
 	if err != nil {
 		return err
 	}

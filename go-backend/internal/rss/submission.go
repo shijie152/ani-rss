@@ -6,11 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 )
 
@@ -30,12 +30,12 @@ type Downloader interface {
 type Submitter struct {
 	Config       appconfig.Reader
 	DownloadPath func(model.Ani) (map[string]any, error)
-	SaveCache    func(context.Context, *http.Client, string, model.Ani, model.Resource) error
+	SaveCache    func(context.Context, *outbound.Client, string, model.Ani, model.Resource) error
 	History      store.HistoryStore
 	Downloader   Downloader
 	Notify       func(context.Context, model.Ani, *model.Resource, string, string) error
 	ConfigDir    string
-	HTTPClient   *http.Client
+	Outbound     *outbound.Client
 	// LocalExists reports whether a resource's target media file is already on
 	// disk. It backs the Java fileExist toggle; nil disables the check.
 	LocalExists func(model.Ani, model.Resource) bool
@@ -196,7 +196,7 @@ func (s *Submitter) recordCache(ctx context.Context, ani model.Ani, resource mod
 	if s.ConfigDir == "" || s.SaveCache == nil {
 		return
 	}
-	if err := s.SaveCache(ctx, s.HTTPClient, s.ConfigDir, ani, resource); err != nil {
+	if err := s.SaveCache(ctx, s.Outbound, s.ConfigDir, ani, resource); err != nil {
 		*failures = append(*failures, resource.Title+": 缓存资源失败: "+err.Error())
 	}
 }

@@ -3,7 +3,7 @@
 核心业务边界使用两类测试持续检查：
 
 - Go fuzz test：针对 RSS 解析与匹配、重复提交决策、torrent 元信息解析、订阅输入校验，以及已有的源站 HTML 解析。
-- Mutation test：使用 Gremlins 修改 `rss`、`torrent`、`source`、`metadata`、`subscription` 五个包，确认现有断言能发现行为变化。
+- Mutation test：使用 Gremlins 修改 `rss`、`torrent`、`source`、`metadata`、`subscription`、`outbound` 六个包，确认现有断言能发现行为变化。
 
 本地运行短时 fuzz：
 

@@ -19,6 +19,7 @@ import (
 	"github.com/shijie152/ani-rss/go-backend/internal/metadata"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
+	"github.com/shijie152/ani-rss/go-backend/internal/testutil"
 )
 
 func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
@@ -62,8 +63,8 @@ func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	ani := model.Ani{ID: "demo", Title: "Demo", URL: "https://example.test/rss", Season: 1, Subgroup: "Group", TMDB: map[string]any{"id": "42"}}
-	client := metadata.New(config.Snapshot(), server.Client())
-	service := media.New(config, client, server.Client(), func(model.Ani) (string, error) { return path, nil })
+	client := metadata.New(config.Snapshot(), testutil.OutboundClient(server.Client()))
+	service := media.New(config, client, testutil.OutboundClient(server.Client()), func(model.Ani) (string, error) { return path, nil })
 	service.ConfigDir = t.TempDir()
 	result, err := service.Scrape(context.Background(), &ani, true)
 	if err != nil {
@@ -122,7 +123,7 @@ func TestScrapeRenamesFilesMatchesSubtitlesAndWritesMetadata(t *testing.T) {
 	if err := config.Update(model.Config{"autoDisabled": true, "completed": true}); err != nil {
 		t.Fatal(err)
 	}
-	completedService := media.New(config, client, server.Client(), func(model.Ani) (string, error) { return completedSource, nil })
+	completedService := media.New(config, client, testutil.OutboundClient(server.Client()), func(model.Ani) (string, error) { return completedSource, nil })
 	completedService.ConfigDir = t.TempDir()
 	completedService.ResolveOther = func(model.Ani, string) (string, error) { return completedTarget, nil }
 	completedAni := ani
@@ -223,7 +224,7 @@ func TestScrapeRecoversAfterTransientAssetFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	ani := model.Ani{ID: "recovery", Title: "Demo", URL: "https://example.test/rss", Season: 1, Subgroup: "Group", TMDB: map[string]any{"id": "42"}}
-	service := media.New(config, metadata.New(config.Snapshot(), server.Client()), server.Client(), func(model.Ani) (string, error) { return path, nil })
+	service := media.New(config, metadata.New(config.Snapshot(), testutil.OutboundClient(server.Client())), testutil.OutboundClient(server.Client()), func(model.Ani) (string, error) { return path, nil })
 	service.ConfigDir = t.TempDir()
 	if _, err := service.Scrape(context.Background(), &ani, true); err == nil {
 		t.Fatal("transient asset failure was hidden")
@@ -255,7 +256,7 @@ func TestRefreshCoverUsesConfigFilesAndDoesNotOverwriteUnlessRequested(t *testin
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("cover")) }))
 	defer server.Close()
 	config := &fakeConfig{value: model.Config{}}
-	service := media.New(config, nil, server.Client(), nil)
+	service := media.New(config, nil, testutil.OutboundClient(server.Client()), nil)
 	service.ConfigDir = t.TempDir()
 	first, err := service.RefreshCover(context.Background(), server.URL+"/cover.png", false)
 	if err != nil || first == "" {
@@ -313,7 +314,7 @@ func TestCustomEpisodeRenameTemplateAndFilenameLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	ani := model.Ani{ID: "custom", Title: "Show", URL: "https://example.test/rss", Season: 2, Subgroup: "Group", TMDB: map[string]any{"id": "42"}, CustomEpisode: true, CustomEpisodeStr: `(?:Episode-)([0-9]+)`, CustomEpisodeGroupIndex: 1}
-	service := media.New(config, metadata.New(config.Snapshot(), metadataServer.Client()), metadataServer.Client(), func(model.Ani) (string, error) { return path, nil })
+	service := media.New(config, metadata.New(config.Snapshot(), testutil.OutboundClient(metadataServer.Client())), testutil.OutboundClient(metadataServer.Client()), func(model.Ani) (string, error) { return path, nil })
 	if _, err := service.Scrape(context.Background(), &ani, true); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +330,7 @@ func TestCustomEpisodeRenameTemplateAndFilenameLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(limitedPath, "Episode-07.mkv"), []byte("video"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	limited := media.New(limitedConfig, metadata.New(limitedConfig.Snapshot(), metadataServer.Client()), metadataServer.Client(), func(model.Ani) (string, error) { return limitedPath, nil })
+	limited := media.New(limitedConfig, metadata.New(limitedConfig.Snapshot(), testutil.OutboundClient(metadataServer.Client())), testutil.OutboundClient(metadataServer.Client()), func(model.Ani) (string, error) { return limitedPath, nil })
 	limitedAni := model.Ani{ID: "limited", Title: "LongTitle", URL: "https://example.test/rss", Season: 2, TMDB: map[string]any{"id": "42"}, CustomEpisode: true, CustomEpisodeStr: `(?:Episode-)([0-9]+)`, CustomEpisodeGroupIndex: 1}
 	if _, err := limited.Scrape(context.Background(), &limitedAni, true); err != nil {
 		t.Fatal(err)

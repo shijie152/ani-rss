@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +15,7 @@ import (
 	appconfig "github.com/shijie152/ani-rss/go-backend/internal/config"
 	"github.com/shijie152/ani-rss/go-backend/internal/downloader"
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 	"github.com/shijie152/ani-rss/go-backend/internal/store"
 	"github.com/shijie152/ani-rss/go-backend/internal/subscription"
 )
@@ -24,7 +24,7 @@ type Coordinator struct {
 	Config        *appconfig.Manager
 	Subscriptions *subscription.Service
 	History       store.HistoryStore
-	HTTPClient    *http.Client
+	Outbound      *outbound.Client
 	QB            downloader.Adapter
 	Notify        func(context.Context, model.Ani, *model.Resource, string, string) error
 	Retry         int
@@ -133,7 +133,7 @@ func (c *Coordinator) refreshFeed(ctx context.Context, item model.Ani, feedURL, 
 }
 
 func (c *Coordinator) intake() *Intake {
-	return &Intake{Config: c.Config, HTTPClient: c.HTTPClient, Retry: c.Retry}
+	return &Intake{Config: c.Config, Outbound: c.Outbound, Retry: c.Retry}
 }
 
 func (c *Coordinator) RefreshAll(ctx context.Context) (map[string][]model.Resource, error) {
@@ -178,12 +178,12 @@ func (c *Coordinator) submit(ctx context.Context, ani model.Ani, resources []mod
 		Downloader:   c.QB,
 		Notify:       c.Notify,
 		ConfigDir:    c.ConfigDir,
-		HTTPClient:   c.HTTPClient,
+		Outbound:     c.Outbound,
 		LocalExists:  c.localFileExists,
 		SaveExist: func(ctx context.Context, a model.Ani, r model.Resource) {
 			// Mirror Java's saveTorrent-on-hit so the fileExist check becomes a
 			// cheap cache lookup on subsequent refreshes.
-			if err := SaveResourceCache(ctx, c.HTTPClient, c.ConfigDir, a, r); err != nil {
+			if err := SaveResourceCache(ctx, c.Outbound, c.ConfigDir, a, r); err != nil {
 				// A cache miss must not fail the refresh; the existence check
 				// still protected this pass.
 				if c.Logger != nil {

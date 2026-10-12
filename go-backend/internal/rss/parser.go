@@ -7,7 +7,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 type feed struct {
@@ -48,51 +48,26 @@ type torrent struct {
 	MagnetURI     string `xml:"magneturi"`
 }
 
-// Fetch downloads an RSS document using the caller's HTTP policy. It is used
-// by conversion as well as the refresh coordinator so default conversion
-// behavior can inspect the same feed without coupling backend handlers to
-// source-specific HTTP details.
-func Fetch(ctx context.Context, client *http.Client, target string, retries int) ([]byte, error) {
+// Fetch downloads an RSS document through the shared third-party entry point.
+// It is used by conversion as well as the refresh coordinator so default
+// conversion behavior can inspect the same feed without coupling backend
+// handlers to source-specific HTTP details.
+func Fetch(ctx context.Context, client *outbound.Client, target string, retries int) ([]byte, error) {
 	if strings.TrimSpace(target) == "" {
 		return nil, errors.New("RSS地址不能为空")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		return nil, errors.New("RSS 客户端未配置")
 	}
-	if retries < 1 {
-		retries = 1
-	}
-	var lastErr error
-	for attempt := 0; attempt < retries; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("User-Agent", "ani-rss-go")
-		response, err := client.Do(request)
-		if err == nil {
-			body, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
-			_ = response.Body.Close()
-			if readErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-				return body, nil
-			}
-			if readErr != nil {
-				lastErr = readErr
-			} else {
-				lastErr = fmt.Errorf("RSS服务返回 HTTP %d", response.StatusCode)
-			}
-		} else {
-			lastErr = err
-		}
-		if attempt+1 < retries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-			}
-		}
-	}
-	return nil, lastErr
+	return client.Read(ctx, outbound.Call{
+		Service:      "rss",
+		Method:       http.MethodGet,
+		URL:          target,
+		MaxBytes:     32 << 20,
+		Attempts:     retries,
+		RetryStatus:  outbound.RetryAnyStatus,
+		StatusPrefix: "RSS服务返回 ",
+	})
 }
 
 func Parse(data []byte, subgroup, source string) ([]model.Resource, error) {

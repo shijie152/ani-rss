@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/shijie152/ani-rss/go-backend/internal/model"
+	"github.com/shijie152/ani-rss/go-backend/internal/outbound"
 )
 
 // Transmission implements the Transmission RPC protocol, including its
 // mandatory 409/session-id challenge.
 type Transmission struct {
 	Host, Username, Password string
-	Client                   *http.Client
+	Outbound                 *outbound.Client
 	mu                       sync.RWMutex
 	sessionID                string
 }
@@ -92,7 +93,7 @@ func (t *Transmission) rpc(ctx context.Context, method string, params map[string
 		if session != "" {
 			headers.Set("X-Transmission-Session-Id", session)
 		}
-		data, status, responseHeaders, requestErr := request(ctx, t.Client, http.MethodPost, endpoint(t.Host, "/transmission/rpc"), headers, encoded)
+		data, status, responseHeaders, requestErr := request(ctx, t.Outbound, http.MethodPost, endpoint(t.Host, "/transmission/rpc"), headers, encoded)
 		if status == http.StatusConflict {
 			if next := responseHeaders.Get("X-Transmission-Session-Id"); next != "" {
 				t.mu.Lock()
@@ -123,7 +124,7 @@ func (t *Transmission) Add(ctx context.Context, resource model.Resource, savePat
 	filename := strings.TrimSpace(resource.Magnet)
 	metainfo := ""
 	if filename == "" {
-		data, err := torrentBytes(ctx, t.Client, resource)
+		data, err := torrentBytes(ctx, t.Outbound, resource)
 		if err != nil {
 			return err
 		}
