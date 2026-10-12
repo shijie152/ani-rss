@@ -79,8 +79,9 @@ const openSeasonPage = async (page, {dark = false} = {}) => {
   }))
 
   await page.goto('/#/seasons')
-  await expect(page.getByRole('heading', {name: '季度'})).toBeVisible()
-  await expect(page.getByText('视觉回归测试番剧', {exact: true})).toBeVisible()
+  // 同 season-page.spec.mjs：首屏要等 SPA 与 Vite 预构建，默认 5 秒不够。
+  await expect(page.getByRole('heading', {name: '季度'})).toBeVisible({timeout: 30_000})
+  await expect(page.getByText('视觉回归测试番剧', {exact: true})).toBeVisible({timeout: 15_000})
   if (dark) await page.evaluate(() => document.documentElement.classList.add('dark'))
   await freezeAnimations(page)
 }
