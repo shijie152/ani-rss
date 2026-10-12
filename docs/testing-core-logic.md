@@ -13,6 +13,20 @@
 
 变异测试固定 `--timeout-coefficient=50`：gremlins 的单个变异体超时按「本次基线耗时 × 系数」计算，默认系数在构建缓存热时会得到几十毫秒的基线，把大量变异体误判成超时（同一份代码实测：默认系数 2 killed/70 timed out，系数 50 得到 57 killed/15 lived/0 timed out）。固定系数后结果不再取决于缓存冷热。
 
+## 何时跑变异测试
+
+变异测试**不在 PR 主路径上**（`.github/workflows/mutation.yml`），单机串行跑满六个包约 8 分钟，加 worker 没有收益（瓶颈是变异体逐个编译、被 Go 构建缓存的锁串行化）。三种触发：
+
+| 触发 | 范围 | 说明 |
+|---|---|---|
+| 每日 03:20 定时 | 全部六个包 | 分片到六个 runner，墙钟约等于最慢的 `source`（约 2.5 分钟） |
+| 手动 `gh workflow run mutation` | 全部六个包 | 发布前或想复核时用 |
+| 给 PR 打上 `mutation` 标签 | 改动涉及的包 | 需要 blocking 的 PR 用这一步升级门禁 |
+
+本地想跑：`bash scripts/test-core-mutations.sh`（按改动选包）、`CORE_TEST_ALL=1 bash scripts/test-core-mutations.sh`（全量）、`bash scripts/test-core-mutations.sh rss metadata`（指定包）。
+
+有效性下限默认 55%（`EFFICACY_THRESHOLD` 可覆盖）：实测各包 63%–84%，超时不计入有效性，所以这条线只会在「测试被改弱」时触发，不会因 CI 抖动误报。
+
 本地运行短时 fuzz：
 
 ```bash

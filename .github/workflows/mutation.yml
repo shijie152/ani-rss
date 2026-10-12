@@ -1,0 +1,56 @@
+name: mutation
+
+# 变异测试不在 PR 主路径上：六个包合计约 1065 个变异体，每个都要重新编译一次，
+# 单机串行跑完约 8 分钟（实测加 worker 没有收益，瓶颈是构建缓存的锁）。三种触发：
+#   - 每日定时全量，不拖累 PR 反馈
+#   - 手动：gh workflow run mutation
+#   - 给 PR 打上 mutation 标签时，只跑这次改动涉及的包
+on:
+  schedule:
+    # 每日 03:20 北京时间
+    - cron: '20 19 * * *'
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Detect packages
+        id: detect
+        env:
+          # PR 触发只跑改动涉及的包；定时与手动触发跑全部。
+          CORE_TEST_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CORE_TEST_FORMAT: json
+          CORE_TEST_ALL: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+        run: echo "packages=$(bash scripts/changed-packages.sh rss torrent source metadata subscription outbound)" >> "$GITHUB_OUTPUT"
+
+  # 一个包一个 runner：分片才能把墙钟从「六个包求和」压到「最慢的那个包」。
+  mutation:
+    needs: packages
+    if: >-
+      needs.packages.outputs.packages != '[]' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'mutation'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.packages.outputs.packages) }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-backend/go.mod
+          cache-dependency-path: go-backend/go.sum
+      - name: Mutation test ${{ matrix.package }}
+        run: bash scripts/test-core-mutations.sh ${{ matrix.package }}
