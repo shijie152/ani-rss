@@ -32,11 +32,13 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '22'
+          # 不要用 corepack：它会下载另一个 pnpm 版本（实测 12.11.2），store 路径
+          # 从 setup-node 缓存的 v10 变成 v11，于是 post 步骤报「缓存路径不存在」
+          # 让整条 workflow 变红；顺带也让 CI 用的 pnpm 版本和这里钉的不一致。
           cache: pnpm
           cache-dependency-path: ani-rss-ui/pnpm-lock.yaml
       - name: Test frontend behavior and mutations
         run: |
-          corepack enable
           pnpm --dir ani-rss-ui install --frozen-lockfile
           pnpm --dir ani-rss-ui test
           pnpm --dir ani-rss-ui test:mutation
@@ -45,7 +47,6 @@ jobs:
           pnpm --dir ani-rss-ui build
       - name: Build release smoke artifacts
         run: |
-          corepack enable
           FORCE_UI_BUILD=1 ANI_RSS_VERSION=test ./scripts/build-go-release.sh
           ./scripts/smoke-go-release.sh
       - name: Set up QEMU
